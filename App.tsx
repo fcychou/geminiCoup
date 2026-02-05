@@ -46,6 +46,7 @@ const App: React.FC = () => {
   
   // Logic Flow State
   const [resumeCallback, setResumeCallback] = useState<(() => void) | null>(null);
+  const [aiChecksComplete, setAiChecksComplete] = useState(false);
 
   // Refs for consistent state access in timeouts/async logic
   const stateRef = useRef({ players, deck, turnIndex });
@@ -57,6 +58,11 @@ const App: React.FC = () => {
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  // Reset checks when turn/action context changes
+  useEffect(() => {
+      setAiChecksComplete(false);
+  }, [pendingAction, phase]);
 
   // -- Logging Helper --
   const addLog = (message: string, type: GameLog['type'] = 'info') => {
@@ -164,67 +170,107 @@ const App: React.FC = () => {
     };
     
     runAiTurn();
-  }, [currentPlayer, phase, gameStarted, isProcessing, players, logs, winner]); // Keep deps but use ref inside logic if needed
+  }, [currentPlayer, phase, gameStarted, isProcessing, players, logs, winner]); 
 
-  // -- AI Reaction Handling (Simplified Effect) --
+  // -- AI Reaction Handling --
   useEffect(() => {
       if (!gameStarted || winner) return;
 
       const handleAiReactions = async () => {
-          if (phase === GamePhase.ActionPending && pendingAction && !isProcessing) {
-             // Scenario 1: Human acts. We check bots.
-             if (pendingAction.actorId === 'p1') {
-                 setIsProcessing(true);
-                 let interrupted = false;
+          // Scenario 1: Pending Action (Someone acted, waiting for reactions)
+          if (phase === GamePhase.ActionPending && pendingAction && !isProcessing && !aiChecksComplete) {
+             const actor = players.find(p => p.id === pendingAction.actorId);
+             
+             // If Human is Actor -> Check Bots
+             // If Bot is Actor -> Check other Bots (and Human if alive)
+             
+             // Logic: Check all potential challengers (Bots only automatically)
+             // If actor is p1, we check all bots.
+             // If actor is bot, we check all OTHER bots. 
+             
+             const potentialBotChallengers = players.filter(p => p.isAi && !p.isEliminated && p.id !== pendingAction.actorId);
+             
+             if (potentialBotChallengers.length > 0) {
+                 // We only auto-process if:
+                 // 1. Actor is p1 (Human) -> we must check bots.
+                 // 2. Actor is Bot AND (Human is eliminated OR we want bots to check each other first)
                  
-                 // Artificial delay for tension
-                 await new Promise(r => setTimeout(r, 1500));
+                 const human = players.find(p => p.id === 'p1');
+                 const shouldAutoCheck = pendingAction.actorId === 'p1' || human?.isEliminated || pendingAction.actorId !== 'p1';
 
-                 for (const p of players) {
-                     if (p.isAi && !p.isEliminated && p.id !== 'p1') {
-                         const decision = await generateAiMove(p, players, logs, pendingAction, phase);
+                 // Note: If actor is bot and human is alive, we run this check. 
+                 // If a bot objects, it interrupts the human's chance to object, which is valid (first come first served or priority).
+                 // We will simply set isProcessing to true so human can't click while we check.
+                 
+                 if (shouldAutoCheck) {
+                     setIsProcessing(true);
+                     let interrupted = false;
+                     
+                     // Delay for suspense
+                     await new Promise(r => setTimeout(r, 1000));
+
+                     for (const bot of potentialBotChallengers) {
+                         const decision = await generateAiMove(bot, players, logs, pendingAction, phase);
                          if (decision.decision === 'Challenge') {
-                             handleChallenge(p.id);
+                             handleChallenge(bot.id);
                              interrupted = true;
                              break;
                          } else if (decision.decision === 'Block') {
-                             handleBlock(p.id);
+                             handleBlock(bot.id);
                              interrupted = true;
                              break;
                          }
                      }
+
+                     if (!interrupted) {
+                         setAiChecksComplete(true);
+                         // If no bot interrupted...
+                         if (pendingAction.actorId === 'p1' || human?.isEliminated) {
+                             // If human was actor (and bots didn't object) -> Resolve
+                             // If human is eliminated (and bots didn't object) -> Resolve
+                             resolveAction();
+                         } else {
+                             // Actor is Bot, Human is Alive, Bots didn't object.
+                             // Return control to UI for Human to decide (Pass/Challenge/Block).
+                             // We do nothing here, just set Processing false.
+                         }
+                     }
+                     setIsProcessing(false);
                  }
-                 
-                 if (!interrupted) {
-                     // No one objected, resolve action
-                     resolveAction();
-                 }
-                 setIsProcessing(false);
+             } else if (players.find(p => p.id === 'p1')?.isEliminated && pendingAction.actorId !== 'p1') {
+                 // No bot challengers (maybe only 1 bot left vs human who is dead? shouldn't happen due to win check)
+                 // Or just no other bots alive.
+                 resolveAction();
              }
           }
           
-          // Scenario 3: Block Pending (Someone blocked).
-          if (phase === GamePhase.BlockPending && pendingAction?.blockerId) {
-             const blocker = players.find(p => p.id === pendingAction.blockerId);
+          // Scenario 2: Block Pending (Someone blocked).
+          if (phase === GamePhase.BlockPending && pendingAction?.blockerId && !aiChecksComplete) {
              const actor = players.find(p => p.id === pendingAction.actorId);
              
-             if (actor?.isAi && pendingAction.blockerId === 'p1' && !isProcessing) {
+             // We need to decide if the ACTOR challenges the BLOCKER.
+             // If Actor is Bot -> Bot decides.
+             // If Actor is Human -> UI handles it.
+             
+             if (actor?.isAi && !isProcessing) {
                  setIsProcessing(true);
                  await new Promise(r => setTimeout(r, 1000));
+                 
                  const decision = await generateAiMove(actor, players, logs, pendingAction, phase);
                  if (decision.decision === 'Challenge') {
-                     handleChallenge(actor.id); // Bot challenges the human's block
+                     handleChallenge(actor.id); // Bot challenges the block
                  } else {
                      addLog(`${actor.name} accepts the block.`, 'info');
                      setPhase(GamePhase.Resolving); // End turn
                  }
+                 setAiChecksComplete(true);
                  setIsProcessing(false);
              }
           }
       };
 
       handleAiReactions();
-  }, [phase, pendingAction, gameStarted, isProcessing, players, winner]);
+  }, [phase, pendingAction, gameStarted, isProcessing, players, winner, aiChecksComplete]);
 
   // -- Core Game Logic --
 
@@ -254,6 +300,7 @@ const App: React.FC = () => {
 
     const newPending: PendingAction = { action, actorId: currentPlayer.id, targetId };
     setPendingAction(newPending);
+    setAiChecksComplete(false);
     
     addLog(`${currentPlayer.name} attempts to ${action}${targetId ? ` on ${getPlayerName(targetId)}` : ''}`, 'action');
 
@@ -334,6 +381,7 @@ const App: React.FC = () => {
       if (!pendingAction) return;
       addLog(`${getPlayerName(blockerId)} BLOCKS the ${pendingAction.action}!`, 'challenge');
       setPendingAction({ ...pendingAction, blockerId });
+      setAiChecksComplete(false); // Reset for block verification
       setPhase(GamePhase.BlockPending);
   };
 
@@ -679,12 +727,21 @@ const App: React.FC = () => {
                 {/* Reaction Menu for Human */}
                 {phase === GamePhase.ActionPending && pendingAction && pendingAction.actorId !== 'p1' && !isProcessing && (
                      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex gap-4 animate-slide-up z-30">
-                         <button onClick={() => { resolveAction(); }} className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-bold shadow-lg">Pass</button>
-                         {ACTION_DETAILS[pendingAction.action].challengeable && (
-                             <button onClick={() => handleChallenge('p1')} className="bg-red-900 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg border border-red-500">Challenge</button>
+                         {!players.find(p=>p.id==='p1')?.isEliminated && (
+                             <>
+                                <button onClick={() => { resolveAction(); }} className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-bold shadow-lg">Pass</button>
+                                {ACTION_DETAILS[pendingAction.action].challengeable && (
+                                    <button onClick={() => handleChallenge('p1')} className="bg-red-900 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg border border-red-500">Challenge</button>
+                                )}
+                                {canBlock(players.find(p => p.id === 'p1')!) && (
+                                    <button onClick={() => handleBlock('p1')} className="bg-blue-900 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg border border-blue-500">Block</button>
+                                )}
+                             </>
                          )}
-                         {canBlock(players.find(p => p.id === 'p1')!) && (
-                             <button onClick={() => handleBlock('p1')} className="bg-blue-900 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg border border-blue-500">Block</button>
+                         {players.find(p=>p.id==='p1')?.isEliminated && (
+                             <div className="bg-black/80 px-4 py-2 rounded text-gray-400 animate-pulse">
+                                 Spectating AI Duel...
+                             </div>
                          )}
                      </div>
                 )}
