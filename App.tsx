@@ -49,10 +49,10 @@ const App: React.FC = () => {
   const [aiChecksComplete, setAiChecksComplete] = useState(false);
 
   // Refs for consistent state access in timeouts/async logic
-  const stateRef = useRef({ players, deck, turnIndex });
+  const stateRef = useRef({ players, deck, turnIndex, gameStarted });
   useEffect(() => {
-      stateRef.current = { players, deck, turnIndex };
-  }, [players, deck, turnIndex]);
+      stateRef.current = { players, deck, turnIndex, gameStarted };
+  }, [players, deck, turnIndex, gameStarted]);
 
   // Scroll logs
   useEffect(() => {
@@ -105,7 +105,31 @@ const App: React.FC = () => {
     setWinner(null);
     setResumeCallback(null);
     setTargetingAction(null);
+    setPendingAction(null);
+    setExchangeCards([]);
+    setSelectedExchangeCards([]);
+    setIsProcessing(false);
+    setAiChecksComplete(false);
+    
     addLog(`Game started with ${numBots} bots.`, 'info');
+  };
+
+  const quitGame = () => {
+      // Remove confirmation to ensure immediate feedback and avoid browser blocking
+      setGameStarted(false);
+      setPhase(GamePhase.Setup);
+      setWinner(null);
+      setLogs([]);
+      setPlayers([]);
+      setDeck([]);
+      setTurnIndex(0); // Reset turn index
+      setPendingAction(null);
+      setTargetingAction(null);
+      setIsProcessing(false);
+      setResumeCallback(null);
+      setExchangeCards([]);
+      setSelectedExchangeCards([]);
+      setAiChecksComplete(false);
   };
 
   const currentPlayer = players[turnIndex];
@@ -113,8 +137,9 @@ const App: React.FC = () => {
   // -- Turn Management --
   const nextTurn = useCallback(() => {
     // Use Ref to ensure we have the latest state even if called via stale closure
-    const currentPlayers = stateRef.current.players;
-    const currentTurnIndex = stateRef.current.turnIndex;
+    const { players: currentPlayers, turnIndex: currentTurnIndex, gameStarted: isGameRunning } = stateRef.current;
+    
+    if (!isGameRunning || currentPlayers.length === 0) return;
 
     let nextIndex = (currentTurnIndex + 1) % currentPlayers.length;
     let loopCount = 0;
@@ -142,13 +167,16 @@ const App: React.FC = () => {
 
   // -- Phase Transition Effect --
   useEffect(() => {
+      if (!gameStarted) return;
       if (phase === GamePhase.Resolving) {
           const timer = setTimeout(() => {
-              nextTurn();
+              if (stateRef.current.gameStarted) {
+                  nextTurn();
+              }
           }, 1000);
           return () => clearTimeout(timer);
       }
-  }, [phase, nextTurn]);
+  }, [phase, nextTurn, gameStarted]);
 
   // -- AI Logic Trigger --
   useEffect(() => {
@@ -161,7 +189,12 @@ const App: React.FC = () => {
         // Simulate thinking time
         await new Promise(r => setTimeout(r, 1000));
         
+        if (!stateRef.current.gameStarted) return;
+
         const decision = await generateAiMove(currentPlayer, players, logs, null, phase);
+        
+        if (!stateRef.current.gameStarted) return;
+
         addLog(`${currentPlayer.name} chose to ${decision.action} ${decision.targetId ? `on ${getPlayerName(decision.targetId)}` : ''}`, 'action');
         
         handleActionSelect(decision.action as ActionType, decision.targetId);
@@ -181,33 +214,20 @@ const App: React.FC = () => {
           if (phase === GamePhase.ActionPending && pendingAction && !isProcessing && !aiChecksComplete) {
              const actor = players.find(p => p.id === pendingAction.actorId);
              
-             // If Human is Actor -> Check Bots
-             // If Bot is Actor -> Check other Bots (and Human if alive)
-             
-             // Logic: Check all potential challengers (Bots only automatically)
-             // If actor is p1, we check all bots.
-             // If actor is bot, we check all OTHER bots. 
-             
              const potentialBotChallengers = players.filter(p => p.isAi && !p.isEliminated && p.id !== pendingAction.actorId);
              
              if (potentialBotChallengers.length > 0) {
-                 // We only auto-process if:
-                 // 1. Actor is p1 (Human) -> we must check bots.
-                 // 2. Actor is Bot AND (Human is eliminated OR we want bots to check each other first)
-                 
                  const human = players.find(p => p.id === 'p1');
                  const shouldAutoCheck = pendingAction.actorId === 'p1' || human?.isEliminated || pendingAction.actorId !== 'p1';
 
-                 // Note: If actor is bot and human is alive, we run this check. 
-                 // If a bot objects, it interrupts the human's chance to object, which is valid (first come first served or priority).
-                 // We will simply set isProcessing to true so human can't click while we check.
-                 
                  if (shouldAutoCheck) {
                      setIsProcessing(true);
                      let interrupted = false;
                      
                      // Delay for suspense
                      await new Promise(r => setTimeout(r, 1000));
+
+                     if (!stateRef.current.gameStarted) return;
 
                      for (const bot of potentialBotChallengers) {
                          const decision = await generateAiMove(bot, players, logs, pendingAction, phase);
@@ -222,24 +242,17 @@ const App: React.FC = () => {
                          }
                      }
 
+                     if (!stateRef.current.gameStarted) return;
+
                      if (!interrupted) {
                          setAiChecksComplete(true);
-                         // If no bot interrupted...
                          if (pendingAction.actorId === 'p1' || human?.isEliminated) {
-                             // If human was actor (and bots didn't object) -> Resolve
-                             // If human is eliminated (and bots didn't object) -> Resolve
                              resolveAction();
-                         } else {
-                             // Actor is Bot, Human is Alive, Bots didn't object.
-                             // Return control to UI for Human to decide (Pass/Challenge/Block).
-                             // We do nothing here, just set Processing false.
                          }
                      }
                      setIsProcessing(false);
                  }
              } else if (players.find(p => p.id === 'p1')?.isEliminated && pendingAction.actorId !== 'p1') {
-                 // No bot challengers (maybe only 1 bot left vs human who is dead? shouldn't happen due to win check)
-                 // Or just no other bots alive.
                  resolveAction();
              }
           }
@@ -248,20 +261,18 @@ const App: React.FC = () => {
           if (phase === GamePhase.BlockPending && pendingAction?.blockerId && !aiChecksComplete) {
              const actor = players.find(p => p.id === pendingAction.actorId);
              
-             // We need to decide if the ACTOR challenges the BLOCKER.
-             // If Actor is Bot -> Bot decides.
-             // If Actor is Human -> UI handles it.
-             
              if (actor?.isAi && !isProcessing) {
                  setIsProcessing(true);
                  await new Promise(r => setTimeout(r, 1000));
                  
+                 if (!stateRef.current.gameStarted) return;
+
                  const decision = await generateAiMove(actor, players, logs, pendingAction, phase);
                  if (decision.decision === 'Challenge') {
-                     handleChallenge(actor.id); // Bot challenges the block
+                     handleChallenge(actor.id); 
                  } else {
                      addLog(`${actor.name} accepts the block.`, 'info');
-                     setPhase(GamePhase.Resolving); // End turn
+                     setPhase(GamePhase.Resolving); 
                  }
                  setAiChecksComplete(true);
                  setIsProcessing(false);
@@ -277,6 +288,9 @@ const App: React.FC = () => {
   const getPlayerName = (id?: string) => players.find(p => p.id === id)?.name || 'Unknown';
 
   const handleActionSelect = (action: ActionType, targetId?: string) => {
+    // Guard clause against undefined currentPlayer
+    if (!currentPlayer) return;
+
     // If target required but not provided, enter targeting mode
     if ((action === ActionType.Steal || action === ActionType.Assassinate || action === ActionType.Coup) && !targetId) {
         setTargetingAction(action);
@@ -602,10 +616,20 @@ const App: React.FC = () => {
       <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10 pointer-events-none"></div>
 
       {/* Header */}
-      <header className="p-4 border-b border-gray-800 bg-gray-900/90 backdrop-blur z-10 relative flex justify-between items-center">
+      <header className="p-4 border-b border-gray-800 bg-gray-900/90 backdrop-blur z-50 relative flex justify-between items-center">
         <h1 className="text-2xl font-bold text-coup-gold tracking-wider">GEMINI COUP</h1>
-        <div className="text-xs text-gray-500">
-           {phase !== GamePhase.Setup && `Phase: ${phase}`}
+        <div className="flex items-center gap-4">
+            {gameStarted && (
+                <button 
+                    onClick={quitGame}
+                    className="text-xs font-bold text-red-500 hover:text-red-400 border border-red-900/50 hover:border-red-500 bg-red-900/10 px-3 py-1.5 rounded transition-colors uppercase tracking-wide cursor-pointer"
+                >
+                    Quit Game
+                </button>
+            )}
+            <div className="text-xs text-gray-500 min-w-[100px] text-right">
+                {phase !== GamePhase.Setup && `Phase: ${phase}`}
+            </div>
         </div>
       </header>
 
@@ -652,7 +676,7 @@ const App: React.FC = () => {
                         <div key={bot.id} className="scale-75 md:scale-90 transition-all">
                             <PlayerSpot 
                               player={bot} 
-                              isCurrentTurn={currentPlayer.id === bot.id} 
+                              isCurrentTurn={currentPlayer?.id === bot.id} 
                               isTarget={pendingAction?.targetId === bot.id}
                               isSelectable={targetingAction !== null && !bot.isEliminated}
                               onClick={() => targetingAction && handleActionSelect(targetingAction, bot.id)}
@@ -687,21 +711,22 @@ const App: React.FC = () => {
                 <div className="mt-auto pt-4 pb-20 md:pb-4 flex justify-center">
                     <PlayerSpot 
                       player={players.find(p => p.id === 'p1')!} 
-                      isCurrentTurn={currentPlayer.id === 'p1'}
+                      isCurrentTurn={currentPlayer?.id === 'p1'}
                       isTarget={pendingAction?.targetId === 'p1'}
                     />
                 </div>
 
                 {/* Floating Action Menu for Human */}
-                {phase === GamePhase.TurnStart && currentPlayer.id === 'p1' && !isProcessing && !targetingAction && (
+                {phase === GamePhase.TurnStart && currentPlayer?.id === 'p1' && !isProcessing && !targetingAction && (
                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl px-4 animate-slide-up z-30">
                         <div className="bg-gray-900/95 border border-gray-700 p-4 rounded-xl shadow-2xl backdrop-blur">
                             <h3 className="text-center text-gray-400 text-xs uppercase tracking-widest mb-3">Choose Action</h3>
                             <div className="grid grid-cols-4 gap-2">
                                 {Object.values(ActionType).map(action => {
                                     const details = ACTION_DETAILS[action];
-                                    const canAfford = players.find(p => p.id === 'p1')!.coins >= details.cost;
-                                    const mustCoup = players.find(p => p.id === 'p1')!.coins >= 10;
+                                    const player = players.find(p => p.id === 'p1');
+                                    const canAfford = player ? player.coins >= details.cost : false;
+                                    const mustCoup = player ? player.coins >= 10 : false;
                                     const disabled = !canAfford || (mustCoup && action !== ActionType.Coup);
 
                                     return (
