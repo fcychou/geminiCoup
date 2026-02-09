@@ -173,7 +173,7 @@ const App: React.FC = () => {
               if (stateRef.current.gameStarted) {
                   nextTurn();
               }
-          }, 1000);
+          }, 500);
           return () => clearTimeout(timer);
       }
   }, [phase, nextTurn, gameStarted]);
@@ -187,7 +187,7 @@ const App: React.FC = () => {
       if (currentPlayer?.isAi && phase === GamePhase.TurnStart && !isProcessing) {
         setIsProcessing(true);
         // Simulate thinking time
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 100));
         
         if (!stateRef.current.gameStarted) return;
 
@@ -225,7 +225,7 @@ const App: React.FC = () => {
                      let interrupted = false;
                      
                      // Delay for suspense
-                     await new Promise(r => setTimeout(r, 1000));
+                     await new Promise(r => setTimeout(r, 200));
 
                      if (!stateRef.current.gameStarted) return;
 
@@ -263,7 +263,7 @@ const App: React.FC = () => {
              
              if (actor?.isAi && !isProcessing) {
                  setIsProcessing(true);
-                 await new Promise(r => setTimeout(r, 1000));
+                 await new Promise(r => setTimeout(r, 200));
                  
                  if (!stateRef.current.gameStarted) return;
 
