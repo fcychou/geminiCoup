@@ -44,6 +44,9 @@ const App: React.FC = () => {
   const [exchangeCards, setExchangeCards] = useState<Card[]>([]);
   const [selectedExchangeCards, setSelectedExchangeCards] = useState<string[]>([]);
   
+  // Animation State
+  const [playerNotifications, setPlayerNotifications] = useState<Record<string, { message: string, type: 'gain' | 'loss' | 'info' | 'error' | 'action' } | null>>({});
+  
   // Logic Flow State
   const [resumeCallback, setResumeCallback] = useState<(() => void) | null>(null);
   const [aiChecksComplete, setAiChecksComplete] = useState(false);
@@ -64,9 +67,17 @@ const App: React.FC = () => {
       setAiChecksComplete(false);
   }, [pendingAction, phase]);
 
-  // -- Logging Helper --
+  // -- Logging & Animation Helpers --
   const addLog = (message: string, type: GameLog['type'] = 'info') => {
     setLogs(prev => [...prev, { id: uuidv4(), message, timestamp: Date.now(), type }]);
+  };
+
+  const showAnim = (playerId: string, message: string, type: 'gain' | 'loss' | 'info' | 'error' | 'action' = 'info') => {
+      setPlayerNotifications(prev => ({ ...prev, [playerId]: { message, type } }));
+      // Clear after animation duration (approx 2s for float-up, shorter for others)
+      setTimeout(() => {
+          setPlayerNotifications(prev => ({ ...prev, [playerId]: null }));
+      }, 2000);
   };
 
   // -- Game Initialization --
@@ -110,6 +121,7 @@ const App: React.FC = () => {
     setSelectedExchangeCards([]);
     setIsProcessing(false);
     setAiChecksComplete(false);
+    setPlayerNotifications({});
     
     addLog(`Game started with ${numBots} bots.`, 'info');
   };
@@ -130,6 +142,7 @@ const App: React.FC = () => {
       setExchangeCards([]);
       setSelectedExchangeCards([]);
       setAiChecksComplete(false);
+      setPlayerNotifications({});
   };
 
   const currentPlayer = players[turnIndex];
@@ -302,21 +315,36 @@ const App: React.FC = () => {
     // Validate costs
     if (action === ActionType.Coup && currentPlayer.coins < 7) {
         addLog("Not enough coins for Coup!", 'error');
+        showAnim(currentPlayer.id, "Need 7 Coins", 'error');
         return;
     }
     if (action === ActionType.Assassinate && currentPlayer.coins < 3) {
         addLog("Not enough coins for Assassinate!", 'error');
+        showAnim(currentPlayer.id, "Need 3 Coins", 'error');
         return;
     }
     
-    if (action === ActionType.Coup) updateCoins(currentPlayer.id, -7);
-    if (action === ActionType.Assassinate) updateCoins(currentPlayer.id, -3);
+    // Pay costs up front? Coup/Assassinate usually pay immediately but can be blocked/challenged
+    // In Coup rules, you pay to take the action.
+    if (action === ActionType.Coup) {
+        updateCoins(currentPlayer.id, -7);
+    }
+    if (action === ActionType.Assassinate) {
+        updateCoins(currentPlayer.id, -3);
+    }
 
     const newPending: PendingAction = { action, actorId: currentPlayer.id, targetId };
     setPendingAction(newPending);
     setAiChecksComplete(false);
     
     addLog(`${currentPlayer.name} attempts to ${action}${targetId ? ` on ${getPlayerName(targetId)}` : ''}`, 'action');
+    
+    // Animate Action Declaration
+    showAnim(currentPlayer.id, action, 'action');
+    if (targetId) {
+        // Delay slighty so it doesn't overlap perfectly with actor animation
+        setTimeout(() => showAnim(targetId, "Targeted!", 'error'), 200);
+    }
 
     // Immediate resolution actions
     if (action === ActionType.Income) {
@@ -350,24 +378,30 @@ const App: React.FC = () => {
         case ActionType.Steal:
             if (targetId) {
                 // Use Ref or callback to get latest coins to avoid race conditions
-                setPlayers(prev => {
-                    const target = prev.find(p => p.id === targetId);
-                    const actor = prev.find(p => p.id === actorId);
-                    if (!target || !actor) return prev;
+                const target = stateRef.current.players.find(p => p.id === targetId);
+                const amount = Math.min(2, target?.coins || 0);
 
-                    const amount = Math.min(2, target.coins);
-                    
+                setPlayers(prev => {
                     return prev.map(p => {
                         if (p.id === targetId) return { ...p, coins: p.coins - amount };
                         if (p.id === actorId) return { ...p, coins: p.coins + amount };
                         return p;
                     });
                 });
+                
+                // Animate Steal
+                if (amount > 0) {
+                   showAnim(actorId, `+${amount} Coins`, 'gain');
+                   showAnim(targetId, `-${amount} Coins`, 'loss');
+                } else {
+                   showAnim(actorId, "No Coins!", 'error');
+                }
             }
             break;
         case ActionType.Assassinate:
         case ActionType.Coup:
             if (targetId) {
+                showAnim(targetId, "ATTACKED!", 'error');
                 if (targetId === 'p1') {
                     loseInfluence(targetId);
                     // On resolve after human loses influence, we finish turn
@@ -387,6 +421,8 @@ const App: React.FC = () => {
 
   const updateCoins = (playerId: string, amount: number) => {
     setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, coins: Math.max(0, p.coins + amount) } : p));
+    if (amount > 0) showAnim(playerId, `+${amount}`, 'gain');
+    if (amount < 0) showAnim(playerId, `${amount}`, 'loss');
   };
 
   // -- Challenge & Block Logic --
@@ -394,6 +430,7 @@ const App: React.FC = () => {
   const handleBlock = (blockerId: string) => {
       if (!pendingAction) return;
       addLog(`${getPlayerName(blockerId)} BLOCKS the ${pendingAction.action}!`, 'challenge');
+      showAnim(blockerId, "BLOCKED!", 'info');
       setPendingAction({ ...pendingAction, blockerId });
       setAiChecksComplete(false); // Reset for block verification
       setPhase(GamePhase.BlockPending);
@@ -405,6 +442,7 @@ const App: React.FC = () => {
       const challengedRole = getRequiredRole(isBlocking ? 'Block' : pendingAction!.action, pendingAction!.action);
 
       addLog(`${getPlayerName(challengerId)} CHALLENGES ${getPlayerName(targetId)}! (Claims ${challengedRole ? challengedRole.join(' or ') : 'valid role'})`, 'challenge');
+      showAnim(challengerId, "CHALLENGE!", 'error');
 
       const targetPlayer = players.find(p => p.id === targetId)!;
       const validRoles = isBlocking 
@@ -512,6 +550,7 @@ const App: React.FC = () => {
       if (liveCards.length === 0) return; 
 
       addLog(`${player.name} must lose an influence.`, 'challenge');
+      showAnim(playerId, "LOST INFLUENCE", 'loss');
 
       if (player.isAi) {
           const cardToLose = liveCards[0]; 
@@ -679,6 +718,7 @@ const App: React.FC = () => {
                               isCurrentTurn={currentPlayer?.id === bot.id} 
                               isTarget={pendingAction?.targetId === bot.id}
                               isSelectable={targetingAction !== null && !bot.isEliminated}
+                              notification={playerNotifications[bot.id]}
                               onClick={() => targetingAction && handleActionSelect(targetingAction, bot.id)}
                             />
                         </div>
@@ -713,6 +753,7 @@ const App: React.FC = () => {
                       player={players.find(p => p.id === 'p1')!} 
                       isCurrentTurn={currentPlayer?.id === 'p1'}
                       isTarget={pendingAction?.targetId === 'p1'}
+                      notification={playerNotifications['p1']}
                     />
                 </div>
 

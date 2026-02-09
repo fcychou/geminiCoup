@@ -7,10 +7,11 @@ interface PlayerSpotProps {
   isCurrentTurn: boolean;
   isTarget?: boolean;
   isSelectable?: boolean;
+  notification?: { message: string, type: 'gain' | 'loss' | 'info' | 'error' | 'action' } | null;
   onClick?: () => void;
 }
 
-const PlayerSpot: React.FC<PlayerSpotProps> = ({ player, isCurrentTurn, isTarget, isSelectable, onClick }) => {
+const PlayerSpot: React.FC<PlayerSpotProps> = ({ player, isCurrentTurn, isTarget, isSelectable, notification, onClick }) => {
   return (
     <div 
       onClick={isSelectable ? onClick : undefined}
@@ -21,6 +22,32 @@ const PlayerSpot: React.FC<PlayerSpotProps> = ({ player, isCurrentTurn, isTarget
       ${isSelectable ? 'cursor-pointer hover:bg-gray-800 ring-2 ring-blue-400 hover:ring-blue-300' : ''}
       ${player.isEliminated ? 'opacity-50 grayscale' : ''}
     `}>
+      {/* Animation Overlay */}
+      {notification && (
+        <div className={`
+            absolute -top-8 left-0 right-0 z-30 flex justify-center pointer-events-none
+            ${notification.type === 'gain' ? 'animate-float-up text-yellow-400 font-bold text-2xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]' : ''}
+            ${notification.type === 'loss' ? 'animate-float-up text-red-500 font-bold text-2xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]' : ''}
+            ${notification.type === 'error' ? 'animate-shake top-1/3' : ''} 
+            ${notification.type === 'action' ? 'animate-pop-in -top-6' : ''}
+            ${notification.type === 'info' ? 'animate-pop-in -top-6' : ''}
+        `}>
+            {notification.type === 'error' || notification.type === 'action' || notification.type === 'info' ? (
+                <div className={`
+                    px-3 py-1 rounded-lg border shadow-xl font-bold text-sm md:text-base whitespace-nowrap
+                    ${notification.type === 'error' ? 'bg-red-900/90 border-red-500 text-white' : ''}
+                    ${notification.type === 'action' ? 'bg-coup-gold text-black border-white' : ''}
+                    ${notification.type === 'info' ? 'bg-blue-900/90 border-blue-400 text-white' : ''}
+                `}>
+                    {notification.message}
+                </div>
+            ) : (
+                 /* Pure text for coins */
+                 <span>{notification.message}</span>
+            )}
+        </div>
+      )}
+
       <div className="flex flex-col items-center">
         <div className="flex items-center space-x-2 mb-2">
           <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center text-xs font-bold text-white">
