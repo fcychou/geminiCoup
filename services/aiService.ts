@@ -21,42 +21,68 @@ export const generateAiMove = async (
         return fallbackAiLogic(bot, players, pendingAction);
     }
 
-    // Simplified state for AI context
+    // Prepare a richer context for the AI
+    const recentLogs = gameHistory.slice(-20).map(l => l.message); // Increased history
+    
     const gameStateSummary = {
         myId: bot.id,
+        myName: bot.name,
         myCoins: bot.coins,
-        myLiveCards: bot.cards.filter(c => !c.revealed).map(c => c.role), // AI knows its cards
+        myLiveCards: bot.cards.filter(c => !c.revealed).map(c => c.role),
         allPlayers: players.map(p => ({
             id: p.id,
+            name: p.name,
             coins: p.coins,
             liveCardsCount: p.cards.filter(c => !c.revealed).length,
             isEliminated: p.isEliminated
         })),
         phase: phase,
         pendingAction: pendingAction,
-        lastLogs: gameHistory.slice(-5).map(l => l.message),
+        lastLogs: recentLogs,
     };
 
     const prompt = `
-    You are playing a game of Coup. You are a bot named ${bot.name} (ID: ${bot.id}).
+    You are playing the board game "Coup". You are a bot named ${bot.name} (ID: ${bot.id}).
     Your goal is to be the last player standing.
-    
+
     Current Game State:
     ${JSON.stringify(gameStateSummary, null, 2)}
 
-    Valid Actions & Costs:
-    Income (+1), Foreign Aid (+2), Tax (+3, claims Duke), Steal (+2, claims Captain), Exchange (claims Ambassador), Assassinate (-3, claims Assassin), Coup (-7).
+    Valid Actions:
+    - Income (+1 coin)
+    - Foreign Aid (+2 coins, blockable by Duke)
+    - Tax (+3 coins, claims Duke, challengeable)
+    - Steal (+2 coins from target, claims Captain, blockable by Captain/Ambassador)
+    - Exchange (swap cards, claims Ambassador)
+    - Assassinate (-3 coins, eliminates influence, claims Assassin, blockable by Contessa)
+    - Coup (-7 coins, unblockable, eliminates influence)
 
-    Instructions:
-    1. If it is your turn to act (Phase: TurnStart), choose an action. If you have >= 10 coins, you MUST Coup.
-    2. If someone else acted (Phase: ActionPending), decide whether to 'Challenge', 'Block' (if eligible), or 'Pass'.
-    3. If you are being blocked (Phase: BlockPending), decide whether to 'Challenge' the block or 'Pass'.
-    4. Play somewhat aggressively but logically. Bluff if necessary but prefer actions supported by your cards.
+    STRATEGIC GUIDELINES:
+    1. **Analyze History (IMPORTANT)**: Look at 'lastLogs'. 
+       - If you recently tried to bluff (e.g., Tax without a Duke) and were challenged, DO NOT try that same action again immediately.
+       - If you tried to Steal from someone and they blocked you, choose a different target or action.
+       - Avoid repeating the same action (like Income) more than twice in a row; it makes you predictable.
     
-    Output JSON ONLY:
+    2. **Turn Logic (Phase: TurnStart)**:
+       - **Must Coup**: If you have >= 10 coins, you must choose 'Coup'.
+       - **Finishing Move**: If you have >= 7 coins, prefer 'Coup' to eliminate a strong rival (high coins or 2 cards).
+       - **Aggression**: If you have < 7 coins, prefer collecting coins quickly (Tax, Foreign Aid, Steal) over Income.
+       - **Bluffing**: It is okay to bluff (e.g., Tax without Duke), but check if opponents have been challenging recently.
+       - **Targeting**: When Stealing or Assassinating, target players with many coins (threats) or players with 1 card left (easy kill).
+
+    3. **Reaction Logic (Phase: ActionPending)**:
+       - If someone acts against you (e.g., Steal on you), and you have the blocker card, BLOCK it.
+       - If you don't have the blocker, mostly Pass, unless you want to risk a bluff block.
+       - If someone claims a role you hold (e.g., they claim Duke but you have 2 Dukes), CHALLENGE them!
+
+    4. **Block Response (Phase: BlockPending)**:
+       - If someone blocks you, and you actually have the card required for your action, CHALLENGE their block.
+       - If you were bluffing, PASS (accept the block) to avoid losing a card.
+
+    Output strictly valid JSON:
     {
-      "decision": "ActionName" or "Challenge" or "Block" or "Pass",
-      "targetId": "TargetPlayerID" (if applicable for Steal, Coup, Assassinate, or Block/Challenge)
+      "decision": "ActionName" (e.g. "Tax", "Coup") or "Challenge" or "Block" or "Pass",
+      "targetId": "TargetPlayerID" (Required for Steal, Coup, Assassinate. Optional otherwise.)
     }
     `;
 
@@ -65,22 +91,34 @@ export const generateAiMove = async (
             model: 'gemini-3-flash-preview',
             contents: prompt,
             config: {
-                responseMimeType: 'application/json'
+                responseMimeType: 'application/json',
+                temperature: 1.0, // High creativity to vary moves
             }
         });
 
         const text = response.text;
         if (!text) throw new Error("Empty response from Gemini");
         const result = JSON.parse(text);
+        
+        // Basic validation ensuring target exists if needed
+        if (['Steal', 'Coup', 'Assassinate'].includes(result.decision) && !result.targetId) {
+            // Auto-pick a target if AI forgot
+            const validTargets = players.filter(p => !p.isEliminated && p.id !== bot.id);
+            if (validTargets.length > 0) {
+                // Pick richest target
+                result.targetId = validTargets.sort((a,b) => b.coins - a.coins)[0].id;
+            }
+        }
+
         return {
             action: result.decision,
             targetId: result.targetId,
             decision: result.decision
         };
     } catch (error: any) {
-        // Handle Quota limits gracefully to keep game running
+        // Fallback
         if (error?.status === 429 || error?.code === 429 || error?.message?.includes('429')) {
-             console.warn("Gemini Quota Exceeded. Switching to basic AI for this turn.");
+             console.warn("Gemini Quota Exceeded. Switching to basic AI.");
         } else {
              console.error("Gemini Error:", error);
         }
@@ -89,45 +127,55 @@ export const generateAiMove = async (
 };
 
 const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingAction | null) => {
-    // Simple fallback logic if API fails or not present
     const aliveOpponents = players.filter(p => !p.isEliminated && p.id !== bot.id);
+    // Prefer target with most coins
     const target = aliveOpponents.length > 0 
-        ? aliveOpponents[Math.floor(Math.random() * aliveOpponents.length)]
+        ? aliveOpponents.sort((a,b) => b.coins - a.coins)[0]
         : null;
 
     if (pendingAction) {
-        // Reaction logic
         if (pendingAction.actorId !== bot.id) {
-             // 10% chance to challenge if appropriate, mostly pass for simple fallback
-             if (Math.random() < 0.1) return { action: 'Challenge', decision: 'Challenge' };
+             // Block if we have the card
+             const actionDetails = ACTION_DETAILS[pendingAction.action];
+             const myBlockers = actionDetails.blockableBy || [];
+             const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
              
-             // Block logic
-             if (pendingAction.action === ActionType.Steal && pendingAction.targetId === bot.id) {
-                // Always try to block steal if targetted
-                 return { action: 'Block', decision: 'Block' };
-             }
-             if (pendingAction.action === ActionType.Assassinate && pendingAction.targetId === bot.id) {
-                 return { action: 'Block', decision: 'Block' };
-             }
-             if (pendingAction.action === ActionType.ForeignAid) {
-                 // 20% chance to block aid
-                 if (Math.random() < 0.2) return { action: 'Block', decision: 'Block' };
-             }
+             // High chance to block if we have the card, low chance to bluff block
+             if (hasBlocker && Math.random() > 0.1) return { action: 'Block', decision: 'Block' };
+             if (!hasBlocker && Math.random() < 0.15) return { action: 'Block', decision: 'Block' };
+
+             // Challenge logic: check if we have conflicting info (e.g. 3 dukes revealed/held means they are lying)
+             // Simple random challenge for now
+             if (Math.random() < 0.05) return { action: 'Challenge', decision: 'Challenge' };
         }
         return { action: 'Pass', decision: 'Pass' };
     }
 
-    // Turn logic
-    // Must target someone for Coup/Assassinate/Steal
     const safeTargetId = target ? target.id : (players.find(p => p.id !== bot.id)?.id); 
 
     if (bot.coins >= 10) return { action: ActionType.Coup, targetId: safeTargetId };
-    if (bot.coins >= 7) return { action: ActionType.Coup, targetId: safeTargetId };
-    if (bot.coins >= 3) return { action: ActionType.Assassinate, targetId: safeTargetId };
     
+    // Weighted Random choices based on cards
+    const liveRoles = bot.cards.filter(c => !c.revealed).map(c => c.role);
+    
+    if (bot.coins >= 7) return { action: ActionType.Coup, targetId: safeTargetId };
+
+    if (liveRoles.includes(Role.Assassin) && bot.coins >= 3) {
+         return { action: ActionType.Assassinate, targetId: safeTargetId };
+    }
+    
+    if (liveRoles.includes(Role.Captain)) {
+        return { action: ActionType.Steal, targetId: safeTargetId };
+    }
+    
+    if (liveRoles.includes(Role.Duke)) {
+        return { action: ActionType.Tax };
+    }
+
+    // If no specific cards, random distribution
     const roll = Math.random();
-    if (roll < 0.3) return { action: ActionType.Tax };
-    if (roll < 0.6) return { action: ActionType.ForeignAid };
-    if (roll < 0.8) return { action: ActionType.Steal, targetId: safeTargetId };
-    return { action: ActionType.Income };
+    if (roll < 0.4) return { action: ActionType.Income };
+    if (roll < 0.7) return { action: ActionType.ForeignAid };
+    if (roll < 0.9) return { action: ActionType.Tax }; // Bluff tax
+    return { action: ActionType.Exchange };
 };
