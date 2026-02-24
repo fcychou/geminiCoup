@@ -18,7 +18,7 @@ export const generateAiMove = async (
     const ai = getAiClient();
     if (!ai) {
         console.warn("No API Key found, using fallback random AI");
-        return fallbackAiLogic(bot, players, pendingAction);
+        return fallbackAiLogic(bot, players, pendingAction, gameHistory);
     }
 
     // Prepare a richer context for the AI
@@ -123,11 +123,11 @@ export const generateAiMove = async (
         } else {
              console.error("Gemini Error:", error);
         }
-        return fallbackAiLogic(bot, players, pendingAction);
+        return fallbackAiLogic(bot, players, pendingAction, gameHistory);
     }
 };
 
-const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingAction | null) => {
+const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingAction | null, gameHistory: GameLog[] = []) => {
     const aliveOpponents = players.filter(p => !p.isEliminated && p.id !== bot.id);
     // Prefer target with most coins
     const target = aliveOpponents.length > 0 
@@ -135,6 +135,7 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
         : null;
 
     if (pendingAction) {
+        // Case 1: Bot is reacting to someone else's action (ActionPending)
         if (pendingAction.actorId !== bot.id) {
              // Check if we are allowed to block
              let canBlock = true;
@@ -156,13 +157,45 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
              // Challenge logic: check if we have conflicting info (e.g. 3 dukes revealed/held means they are lying)
              // Simple random challenge for now
              if (Math.random() < 0.05) return { action: 'Challenge', decision: 'Challenge' };
+        } 
+        // Case 2: Bot was blocked (BlockPending) - pendingAction.actorId === bot.id
+        else if (pendingAction.blockerId) {
+             // Decide to Challenge the block or Pass (accept block)
+             // If we have the card we claimed, we might challenge
+             // If we don't, we should Pass
+             
+             // Check if we have the card for the action we took
+             let claimedRole: Role | null = null;
+             if (pendingAction.action === ActionType.Tax) claimedRole = Role.Duke;
+             if (pendingAction.action === ActionType.Steal) claimedRole = Role.Captain;
+             if (pendingAction.action === ActionType.Assassinate) claimedRole = Role.Assassin;
+             if (pendingAction.action === ActionType.Exchange) claimedRole = Role.Ambassador;
+
+             const hasClaimedRole = claimedRole && bot.cards.some(c => !c.revealed && c.role === claimedRole);
+
+             // If we have the card, 30% chance to challenge the block (aggressive)
+             if (hasClaimedRole && Math.random() < 0.3) {
+                 return { action: 'Challenge', decision: 'Challenge' };
+             }
+             // If we don't have the card, 5% chance to challenge (bluff challenge)
+             if (!hasClaimedRole && Math.random() < 0.05) {
+                 return { action: 'Challenge', decision: 'Challenge' };
+             }
+             
+             // Otherwise accept the block
+             return { action: 'Pass', decision: 'Pass' };
         }
+
         return { action: 'Pass', decision: 'Pass' };
     }
 
     const safeTargetId = target ? target.id : (players.find(p => p.id !== bot.id)?.id); 
 
     if (bot.coins >= 10) return { action: ActionType.Coup, targetId: safeTargetId };
+    
+    // Check history to avoid repeating blocked moves
+    const recentLogs = gameHistory.slice(-5);
+    const wasBlockedRecently = recentLogs.some(l => l.message.includes(`${bot.name} accepts the block`));
     
     // Weighted Random choices based on cards
     const liveRoles = bot.cards.filter(c => !c.revealed).map(c => c.role);
@@ -173,8 +206,11 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
          return { action: ActionType.Assassinate, targetId: safeTargetId };
     }
     
+    // If we have Captain, usually Steal, but if blocked recently, maybe do something else
     if (liveRoles.includes(Role.Captain)) {
-        return { action: ActionType.Steal, targetId: safeTargetId };
+        if (!wasBlockedRecently || Math.random() > 0.7) {
+            return { action: ActionType.Steal, targetId: safeTargetId };
+        }
     }
     
     if (liveRoles.includes(Role.Duke)) {
@@ -183,6 +219,14 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
 
     // If no specific cards, random distribution
     const roll = Math.random();
+    
+    // If blocked recently, prefer safe income/foreign aid over stealing
+    if (wasBlockedRecently) {
+        if (roll < 0.5) return { action: ActionType.Income };
+        if (roll < 0.9) return { action: ActionType.ForeignAid };
+        return { action: ActionType.Exchange };
+    }
+
     if (roll < 0.4) return { action: ActionType.Income };
     if (roll < 0.7) return { action: ActionType.ForeignAid };
     if (roll < 0.9) return { action: ActionType.Tax }; // Bluff tax
