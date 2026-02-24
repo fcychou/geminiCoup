@@ -429,6 +429,14 @@ const App: React.FC = () => {
 
   const handleBlock = (blockerId: string) => {
       if (!pendingAction) return;
+
+      // Validate that only the target can block Steal or Assassinate
+      if ((pendingAction.action === ActionType.Steal || pendingAction.action === ActionType.Assassinate) && 
+           pendingAction.targetId !== blockerId) {
+          // Ideally we should log this or show an error, but for now just returning prevents the illegal state
+          return;
+      }
+
       addLog(`${getPlayerName(blockerId)} BLOCKS the ${pendingAction.action}!`, 'challenge');
       showAnim(blockerId, "BLOCKED!", 'info');
       setPendingAction({ ...pendingAction, blockerId });

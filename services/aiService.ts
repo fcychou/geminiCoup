@@ -52,9 +52,9 @@ export const generateAiMove = async (
     - Income (+1 coin)
     - Foreign Aid (+2 coins, blockable by Duke)
     - Tax (+3 coins, claims Duke, challengeable)
-    - Steal (+2 coins from target, claims Captain, blockable by Captain/Ambassador)
+    - Steal (+2 coins from target, claims Captain, blockable by Captain/Ambassador - ONLY TARGET CAN BLOCK)
     - Exchange (swap cards, claims Ambassador)
-    - Assassinate (-3 coins, eliminates influence, claims Assassin, blockable by Contessa)
+    - Assassinate (-3 coins, eliminates influence, claims Assassin, blockable by Contessa - ONLY TARGET CAN BLOCK)
     - Coup (-7 coins, unblockable, eliminates influence)
 
     STRATEGIC GUIDELINES:
@@ -72,6 +72,7 @@ export const generateAiMove = async (
 
     3. **Reaction Logic (Phase: ActionPending)**:
        - If someone acts against you (e.g., Steal on you), and you have the blocker card, BLOCK it.
+       - IMPORTANT: You can ONLY block Steal or Assassinate if YOU are the target. Do NOT block if you are not the target.
        - If you don't have the blocker, mostly Pass, unless you want to risk a bluff block.
        - If someone claims a role you hold (e.g., they claim Duke but you have 2 Dukes), CHALLENGE them!
 
@@ -135,14 +136,22 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
 
     if (pendingAction) {
         if (pendingAction.actorId !== bot.id) {
-             // Block if we have the card
-             const actionDetails = ACTION_DETAILS[pendingAction.action];
-             const myBlockers = actionDetails.blockableBy || [];
-             const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
-             
-             // High chance to block if we have the card, low chance to bluff block
-             if (hasBlocker && Math.random() > 0.1) return { action: 'Block', decision: 'Block' };
-             if (!hasBlocker && Math.random() < 0.15) return { action: 'Block', decision: 'Block' };
+             // Check if we are allowed to block
+             let canBlock = true;
+             if (pendingAction.action === 'Steal' || pendingAction.action === 'Assassinate') {
+                 if (pendingAction.targetId !== bot.id) canBlock = false;
+             }
+
+             if (canBlock) {
+                 // Block if we have the card
+                 const actionDetails = ACTION_DETAILS[pendingAction.action as ActionType]; // Cast to ActionType
+                 const myBlockers = actionDetails?.blockableBy || [];
+                 const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
+                 
+                 // High chance to block if we have the card, low chance to bluff block
+                 if (hasBlocker && Math.random() > 0.1) return { action: 'Block', decision: 'Block' };
+                 if (!hasBlocker && Math.random() < 0.15) return { action: 'Block', decision: 'Block' };
+             }
 
              // Challenge logic: check if we have conflicting info (e.g. 3 dukes revealed/held means they are lying)
              // Simple random challenge for now
