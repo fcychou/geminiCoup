@@ -129,10 +129,46 @@ export const generateAiMove = async (
 
 const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingAction | null, gameHistory: GameLog[] = []) => {
     const aliveOpponents = players.filter(p => !p.isEliminated && p.id !== bot.id);
-    // Prefer target with most coins
-    const target = aliveOpponents.length > 0 
-        ? aliveOpponents.sort((a,b) => b.coins - a.coins)[0]
-        : null;
+    
+    // -- Phase Detection --
+    const totalPlayers = players.length;
+    const aliveCount = aliveOpponents.length + 1;
+    const maxCoins = Math.max(...players.map(p => p.coins));
+    
+    let gamePhase = 'MID';
+    if (aliveCount > 3 || (aliveCount > 2 && maxCoins < 5)) {
+        gamePhase = 'EARLY';
+    } else if (aliveCount === 2) {
+        gamePhase = 'END_1V1';
+    } else if (aliveCount === 3 && players.every(p => p.isEliminated || p.cards.filter(c => !c.revealed).length === 1)) {
+        gamePhase = 'END_3P_PARADOX';
+    }
+
+    // -- Target Selection Strategy --
+    let targetId: string | undefined;
+    
+    if (gamePhase === 'MID') {
+        // Mid-Game: Target the leader (Tall Poppy Syndrome)
+        const leader = aliveOpponents.sort((a, b) => {
+             const scoreA = a.coins + (a.cards.filter(c => !c.revealed).length * 5);
+             const scoreB = b.coins + (b.cards.filter(c => !c.revealed).length * 5);
+             return scoreB - scoreA;
+        })[0];
+        targetId = leader?.id;
+    } else if (gamePhase === 'END_3P_PARADOX') {
+        // 3-Player Paradox: If rich, forced to coup runner-up (second strongest) to avoid being weak vs third
+        // Actually, standard logic is to hit the strongest threat.
+        const sortedThreats = aliveOpponents.sort((a, b) => b.coins - a.coins);
+        targetId = sortedThreats[0]?.id;
+    } else {
+        // Default: Target richest
+        const richest = aliveOpponents.sort((a, b) => b.coins - a.coins)[0];
+        targetId = richest?.id;
+    }
+    
+    // Fallback safe target
+    const safeTargetId = targetId || aliveOpponents[0]?.id;
+
 
     if (pendingAction) {
         // Case 1: Bot is reacting to someone else's action (ActionPending)
@@ -149,22 +185,26 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
                  const myBlockers = actionDetails?.blockableBy || [];
                  const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
                  
-                 // High chance to block if we have the card, low chance to bluff block
-                 if (hasBlocker && Math.random() > 0.1) return { action: 'Block', decision: 'Block' };
-                 if (!hasBlocker && Math.random() < 0.15) return { action: 'Block', decision: 'Block' };
+                 // Strategy: In End-Game 1v1, block aggressively even if bluffing
+                 const bluffBlockChance = gamePhase === 'END_1V1' ? 0.4 : 0.15;
+                 
+                 if (hasBlocker && Math.random() > 0.05) return { action: 'Block', decision: 'Block' };
+                 if (!hasBlocker && Math.random() < bluffBlockChance) return { action: 'Block', decision: 'Block' };
              }
 
-             // Challenge logic: check if we have conflicting info (e.g. 3 dukes revealed/held means they are lying)
-             // Simple random challenge for now
-             if (Math.random() < 0.05) return { action: 'Challenge', decision: 'Challenge' };
+             // Challenge logic
+             // Check if the action is actually challengeable
+             const isChallengeable = ACTION_DETAILS[pendingAction.action as ActionType]?.challengeable;
+             
+             if (isChallengeable) {
+                 // Mid-Game: Strategic Sacrifice? Maybe challenge more often if low on influence to try and catch a bluff?
+                 // For now, keep simple random challenge, but increase slightly in 1v1
+                 const challengeChance = gamePhase === 'END_1V1' ? 0.15 : 0.05;
+                 if (Math.random() < challengeChance) return { action: 'Challenge', decision: 'Challenge' };
+             }
         } 
         // Case 2: Bot was blocked (BlockPending) - pendingAction.actorId === bot.id
         else if (pendingAction.blockerId) {
-             // Decide to Challenge the block or Pass (accept block)
-             // If we have the card we claimed, we might challenge
-             // If we don't, we should Pass
-             
-             // Check if we have the card for the action we took
              let claimedRole: Role | null = null;
              if (pendingAction.action === ActionType.Tax) claimedRole = Role.Duke;
              if (pendingAction.action === ActionType.Steal) claimedRole = Role.Captain;
@@ -182,31 +222,72 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
                  return { action: 'Challenge', decision: 'Challenge' };
              }
              
-             // Otherwise accept the block
              return { action: 'Pass', decision: 'Pass' };
         }
 
         return { action: 'Pass', decision: 'Pass' };
     }
 
-    const safeTargetId = target ? target.id : (players.find(p => p.id !== bot.id)?.id); 
+    // -- Action Logic (Turn Start) --
 
+    // 1. Forced Coup
     if (bot.coins >= 10) return { action: ActionType.Coup, targetId: safeTargetId };
     
     // Check history to avoid repeating blocked moves
     const recentLogs = gameHistory.slice(-5);
     const wasBlockedRecently = recentLogs.some(l => l.message.includes(`${bot.name} accepts the block`));
     
-    // Weighted Random choices based on cards
     const liveRoles = bot.cards.filter(c => !c.revealed).map(c => c.role);
     
-    if (bot.coins >= 7) return { action: ActionType.Coup, targetId: safeTargetId };
+    // 2. End-Game 3-Player Paradox: If rich, maybe delay coup if not forced?
+    // Actually, if we have 7+ coins, we usually want to Coup to eliminate a threat.
+    if (bot.coins >= 7) {
+        // In 3-player paradox, if we coup, we are left with 0 coins against the 3rd player.
+        // But we can't skip turn. We must take an action. 
+        // If we have 7-9 coins, we COULD choose not to Coup yet (e.g. Tax/Steal) to build a bigger buffer?
+        // But standard logic is Coup. Let's stick to Coup for now unless specifically trying to be clever.
+        return { action: ActionType.Coup, targetId: safeTargetId };
+    }
 
+    // 3. Card-Based Actions (High Priority)
     if (liveRoles.includes(Role.Assassin) && bot.coins >= 3) {
          return { action: ActionType.Assassinate, targetId: safeTargetId };
     }
     
-    // If we have Captain, usually Steal, but if blocked recently, maybe do something else
+    // End-Game 1v1: Captain is King
+    if (gamePhase === 'END_1V1' && liveRoles.includes(Role.Captain)) {
+        return { action: ActionType.Steal, targetId: safeTargetId };
+    }
+    
+    // 4. Phase-Based Strategy
+    const roll = Math.random();
+
+    if (gamePhase === 'EARLY') {
+        // Early Game: Accumulation & Low Profile
+        // High chance for Ambassador (Exchange) to fix hand
+        if (roll < 0.3) return { action: ActionType.Exchange };
+        
+        // "Duke Tax": High reward, but risky. 
+        if (roll < 0.6) return { action: ActionType.Tax }; // 30% chance
+        
+        // Slow Play: Income instead of Foreign Aid
+        if (roll < 0.8) return { action: ActionType.Income }; // 20% chance
+        
+        // Foreign Aid (risky early due to many Dukes)
+        return { action: ActionType.ForeignAid };
+    }
+    
+    if (gamePhase === 'END_1V1') {
+        // Aggressive Stealing (Bluffing Captain)
+        if (!wasBlockedRecently && roll < 0.4) return { action: ActionType.Steal, targetId: safeTargetId };
+        
+        // Tax is always good
+        if (roll < 0.7) return { action: ActionType.Tax };
+        
+        return { action: ActionType.Income };
+    }
+
+    // Default / Mid-Game Logic
     if (liveRoles.includes(Role.Captain)) {
         if (!wasBlockedRecently || Math.random() > 0.7) {
             return { action: ActionType.Steal, targetId: safeTargetId };
@@ -217,18 +298,15 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
         return { action: ActionType.Tax };
     }
 
-    // If no specific cards, random distribution
-    const roll = Math.random();
-    
-    // If blocked recently, prefer safe income/foreign aid over stealing
+    // If blocked recently, prefer safe income/foreign aid
     if (wasBlockedRecently) {
         if (roll < 0.5) return { action: ActionType.Income };
         if (roll < 0.9) return { action: ActionType.ForeignAid };
         return { action: ActionType.Exchange };
     }
 
-    if (roll < 0.4) return { action: ActionType.Income };
-    if (roll < 0.7) return { action: ActionType.ForeignAid };
-    if (roll < 0.9) return { action: ActionType.Tax }; // Bluff tax
+    if (roll < 0.3) return { action: ActionType.Income };
+    if (roll < 0.6) return { action: ActionType.ForeignAid };
+    if (roll < 0.85) return { action: ActionType.Tax }; // Bluff tax
     return { action: ActionType.Exchange };
 };
