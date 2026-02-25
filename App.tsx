@@ -208,7 +208,10 @@ const App: React.FC = () => {
         
         if (!stateRef.current.gameStarted) return;
 
-        addLog(`${currentPlayer.name} chose to ${decision.action} ${decision.targetId ? `on ${getPlayerName(decision.targetId)}` : ''}`, 'action');
+        const targetedActions = [ActionType.Steal, ActionType.Assassinate, ActionType.Coup];
+        const showTarget = targetedActions.includes(decision.action as ActionType) && decision.targetId;
+
+        addLog(`${currentPlayer.name} chose to ${decision.action}${showTarget ? ` on ${getPlayerName(decision.targetId!)}` : ''}`, 'action');
         
         handleActionSelect(decision.action as ActionType, decision.targetId);
         setIsProcessing(false);

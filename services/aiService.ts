@@ -243,6 +243,20 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
                  canBlock = false;
              }
 
+             // -- 1v1 Desperation Block (Stop Foreign Aid) --
+             // If opponent is taking Foreign Aid to reach Coup range (7+), we MUST stop them.
+             if (gamePhase === 'END_1V1' && 
+                 pendingAction.action === ActionType.ForeignAid && 
+                 bot.cards.filter(c => !c.revealed).length === 1) {
+                 
+                 const opponent = players.find(p => p.id === pendingAction.actorId);
+                 if (opponent && opponent.coins >= 5) {
+                     // They are threatening to win. Block!
+                     // If we have Duke, great. If not, bluff Duke.
+                     return { action: 'Block', decision: 'Block' };
+                 }
+             }
+
              // 2. Target specific checks
              if (pendingAction.action === 'Steal' || pendingAction.action === 'Assassinate') {
                  if (pendingAction.targetId !== bot.id) canBlock = false;
@@ -320,6 +334,25 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     // 3. Card-Based Actions (High Priority)
     if (liveRoles.includes(Role.Assassin) && bot.coins >= 3) {
          return { action: ActionType.Assassinate, targetId: safeTargetId };
+    }
+    
+    // -- 1v1 Desperation Attack --
+    // If opponent is close to Coup (5+ coins) and we are vulnerable (1 card), we must act fast.
+    if (gamePhase === 'END_1V1' && bot.cards.filter(c => !c.revealed).length === 1) {
+        const opponent = aliveOpponents[0];
+        if (opponent && opponent.coins >= 5) {
+            // Priority 1: Assassinate (if we have coins) - even if bluffing Assassin
+            if (bot.coins >= 3) {
+                 return { action: ActionType.Assassinate, targetId: safeTargetId };
+            }
+            // Priority 2: Steal (to reduce their coins below 7 threshold)
+            // Even if bluffing Captain
+            if (!wasBlockedRecently) {
+                return { action: ActionType.Steal, targetId: safeTargetId };
+            }
+            // Priority 3: Tax (to get coins for Assassinate/Coup ASAP)
+            return { action: ActionType.Tax };
+        }
     }
     
     // End-Game 1v1: Captain is King
