@@ -169,19 +169,87 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     // Fallback safe target
     const safeTargetId = targetId || aliveOpponents[0]?.id;
 
+    // -- History Analysis for Momentum --
+    let lastAction: ActionType | null = null;
+    let actionFailed = false;
+
+    // Find last action by this bot
+    for (let i = gameHistory.length - 1; i >= 0; i--) {
+        const log = gameHistory[i];
+        // Log format: "Name chose to Action..." or "Name attempts to Action..."
+        if (log.message.startsWith(bot.name)) {
+            if (log.message.includes(' attempts to ') || log.message.includes(' chose to ')) {
+                const parts = log.message.split(' ');
+                const toIndex = parts.indexOf('to');
+                if (toIndex !== -1 && toIndex + 1 < parts.length) {
+                     let extractedAction = parts[toIndex + 1];
+                     if (extractedAction === 'Foreign' && parts[toIndex + 2] === 'Aid') {
+                         extractedAction = 'Foreign Aid';
+                     }
+                     
+                     // Clean up potential trailing punctuation or words (e.g. "Tax on...")
+                     // The action name is usually clean, but let's be safe
+                     const matchedAction = Object.values(ActionType).find(a => a === extractedAction);
+                     
+                     if (matchedAction) {
+                         lastAction = matchedAction;
+                         
+                         // Check if it failed in subsequent logs
+                         const subsequentLogs = gameHistory.slice(i + 1);
+                         actionFailed = subsequentLogs.some(l => 
+                            (l.message.includes(`${bot.name} accepts the block`)) || // Blocked and accepted
+                            (l.message.includes(`${bot.name} CANNOT prove role`)) || // Challenged and lost
+                            (l.message.includes(`${bot.name} must lose an influence`)) // Usually result of lost challenge
+                         );
+                         break; // Found the last action
+                     }
+                }
+            }
+        }
+    }
+
 
     if (pendingAction) {
         // Case 1: Bot is reacting to someone else's action (ActionPending)
         if (pendingAction.actorId !== bot.id) {
+
+             // -- Desperation Logic --
+             // If targeted by Assassinate and only 1 card left, we are dead if we do nothing.
+             // We MUST fight back (Block or Challenge) because we have nothing to lose.
+             if (pendingAction.action === ActionType.Assassinate && 
+                 pendingAction.targetId === bot.id && 
+                 bot.cards.filter(c => !c.revealed).length === 1) {
+                 
+                 const hasContessa = bot.cards.some(c => !c.revealed && c.role === Role.Contessa);
+                 // If we have Contessa, obviously block
+                 if (hasContessa) return { action: 'Block', decision: 'Block' };
+                 
+                 // If we don't, we must bluff.
+                 // Blocking (claiming Contessa) is usually better than Challenging (claiming they don't have Assassin),
+                 // because they might actually have the Assassin.
+                 // 80% Block, 20% Challenge
+                 return Math.random() < 0.8 
+                    ? { action: 'Block', decision: 'Block' }
+                    : { action: 'Challenge', decision: 'Challenge' };
+             }
+
              // Check if we are allowed to block
              let canBlock = true;
+             
+             const actionDetails = ACTION_DETAILS[pendingAction.action as ActionType];
+
+             // 1. Check if action is blockable at all (Exchange, Tax, Income, Coup are not blockable)
+             if (!actionDetails?.blockableBy || actionDetails.blockableBy.length === 0) {
+                 canBlock = false;
+             }
+
+             // 2. Target specific checks
              if (pendingAction.action === 'Steal' || pendingAction.action === 'Assassinate') {
                  if (pendingAction.targetId !== bot.id) canBlock = false;
              }
 
              if (canBlock) {
                  // Block if we have the card
-                 const actionDetails = ACTION_DETAILS[pendingAction.action as ActionType]; // Cast to ActionType
                  const myBlockers = actionDetails?.blockableBy || [];
                  const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
                  
@@ -261,6 +329,24 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     
     // 4. Phase-Based Strategy
     const roll = Math.random();
+
+    // -- Momentum Logic --
+    // If the last action worked (bluff or not), high chance to repeat it.
+    // We do this BEFORE phase logic to override it with "what's working".
+    if (lastAction && !actionFailed && Math.random() < 0.6) {
+        // Validate constraints for the repeated action
+        let canRepeat = true;
+        if (lastAction === ActionType.Assassinate && bot.coins < 3) canRepeat = false;
+        if (lastAction === ActionType.Coup && bot.coins < 7) canRepeat = false;
+        if (lastAction === ActionType.Steal && !safeTargetId) canRepeat = false;
+        
+        // Don't repeat Exchange too often, it's passive
+        if (lastAction === ActionType.Exchange && Math.random() > 0.3) canRepeat = false;
+
+        if (canRepeat) {
+            return { action: lastAction, targetId: safeTargetId };
+        }
+    }
 
     if (gamePhase === 'EARLY') {
         // Early Game: Accumulation & Low Profile
