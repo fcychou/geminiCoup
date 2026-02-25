@@ -2,6 +2,153 @@ import { GoogleGenAI } from "@google/genai";
 import { Player, GameLog, ActionType, Role, PendingAction } from "../types";
 import { ACTION_DETAILS } from "../constants";
 
+type RoleScore = Record<Role, number>;
+type BeliefMap = Record<string, RoleScore>;
+
+const AI_TUNING = {
+    belief: {
+        base: 1,
+        actionAttempt: 0.8,
+        block: 0.9,
+        challengeFail: 2.2,
+        challengeSuccess: -2.2,
+        reveal: 1.2,
+        normalizeDivisor: 4,
+    },
+    challenge: {
+        base1v1: 0.12,
+        baseMulti: 0.05,
+        deadRoleFloor: 0.85,
+        lowBeliefBonus: 0.25,
+        doubleRoleFloor: 0.6,
+        assassinateTargetBonus: 0.2,
+        min: 0.05,
+        max: 0.9,
+    },
+    blockChallenge: {
+        base1v1: 0.25,
+        baseMulti: 0.1,
+        deadRoleFloor: 0.85,
+        lowBeliefBonus: 0.25,
+        noActionRolePenalty: 0.2,
+        min: 0.05,
+        max: 0.9,
+    },
+    threat: {
+        liveCardWeight: 5,
+        assassinWeight: 2.5,
+        dukeWeight: 2.0,
+        captainWeight: 1.5,
+        contessaWeight: 0.5,
+        coupThreshold7: 4,
+        coupThreshold9: 2,
+        finishBias: 2,
+    },
+    bluff: {
+        block1v1: 0.4,
+        blockMulti: 0.15,
+        challengeRoleConfidence: 0.35,
+    },
+};
+
+const roleScoreBase = (): RoleScore => ({
+    [Role.Duke]: AI_TUNING.belief.base,
+    [Role.Assassin]: AI_TUNING.belief.base,
+    [Role.Captain]: AI_TUNING.belief.base,
+    [Role.Ambassador]: AI_TUNING.belief.base,
+    [Role.Contessa]: AI_TUNING.belief.base,
+});
+
+const getRoleForAction = (action: ActionType): Role[] => {
+    switch(action) {
+        case ActionType.Tax: return [Role.Duke];
+        case ActionType.Assassinate: return [Role.Assassin];
+        case ActionType.Steal: return [Role.Captain];
+        case ActionType.Exchange: return [Role.Ambassador];
+        default: return [];
+    }
+};
+
+const countRevealedRoles = (players: Player[]) => {
+    const counts: Record<Role, number> = {
+        [Role.Duke]: 0,
+        [Role.Assassin]: 0,
+        [Role.Captain]: 0,
+        [Role.Ambassador]: 0,
+        [Role.Contessa]: 0,
+    };
+    players.forEach(p => {
+        p.cards.forEach(c => {
+            if (c.revealed) counts[c.role] += 1;
+        });
+    });
+    return counts;
+};
+
+const buildBeliefs = (players: Player[], logs: GameLog[]) => {
+    const beliefs: BeliefMap = {};
+    players.forEach(p => { beliefs[p.id] = roleScoreBase(); });
+
+    const revealedCounts = countRevealedRoles(players);
+    const deadRoles = new Set<Role>(Object.values(Role).filter(r => revealedCounts[r] >= 3));
+
+    const boost = (playerId: string, roles: Role[] | undefined, amount: number) => {
+        if (!roles) return;
+        const table = beliefs[playerId];
+        if (!table) return;
+        roles.forEach(r => {
+            table[r] = Math.max(0, table[r] + amount);
+        });
+    };
+
+    logs.forEach(l => {
+        const meta = l.meta;
+        if (!meta?.event || !meta.actorId) return;
+        if (meta.event === 'action_attempt' && meta.action) {
+            boost(meta.actorId, getRoleForAction(meta.action as ActionType), AI_TUNING.belief.actionAttempt);
+        }
+        if (meta.event === 'block' && meta.action) {
+            boost(meta.actorId, ACTION_DETAILS[meta.action as ActionType]?.blockableBy, AI_TUNING.belief.block);
+        }
+        if (meta.event === 'challenge_fail') {
+            boost(meta.actorId, meta.roles, AI_TUNING.belief.challengeFail);
+        }
+        if (meta.event === 'challenge_success') {
+            boost(meta.actorId, meta.roles, AI_TUNING.belief.challengeSuccess);
+        }
+        if (meta.event === 'reveal') {
+            boost(meta.actorId, meta.roles, AI_TUNING.belief.reveal);
+        }
+    });
+
+    // If all copies of a role are revealed, no one can claim it.
+    Object.values(Role).forEach(r => {
+        if (!deadRoles.has(r)) return;
+        players.forEach(p => {
+            beliefs[p.id][r] = 0;
+        });
+    });
+
+    return { beliefs, deadRoles };
+};
+
+const normalizeBelief = (score: number) => Math.max(0, Math.min(1, score / AI_TUNING.belief.normalizeDivisor));
+
+const computeThreatScore = (player: Player, beliefs: BeliefMap) => {
+    const liveCards = player.cards.filter(c => !c.revealed).length;
+    const belief = beliefs[player.id] || roleScoreBase();
+    const score =
+        player.coins +
+        liveCards * AI_TUNING.threat.liveCardWeight +
+        normalizeBelief(belief[Role.Assassin]) * AI_TUNING.threat.assassinWeight +
+        normalizeBelief(belief[Role.Duke]) * AI_TUNING.threat.dukeWeight +
+        normalizeBelief(belief[Role.Captain]) * AI_TUNING.threat.captainWeight +
+        normalizeBelief(belief[Role.Contessa]) * AI_TUNING.threat.contessaWeight +
+        (player.coins >= 7 ? AI_TUNING.threat.coupThreshold7 : 0) +
+        (player.coins >= 9 ? AI_TUNING.threat.coupThreshold9 : 0);
+    return score;
+};
+
 const getAiClient = () => {
     const apiKey = process.env.API_KEY;
     if (!apiKey) return null;
@@ -129,6 +276,7 @@ export const generateAiMove = async (
 
 const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingAction | null, gameHistory: GameLog[] = []) => {
     const aliveOpponents = players.filter(p => !p.isEliminated && p.id !== bot.id);
+    const { beliefs, deadRoles } = buildBeliefs(players, gameHistory);
     
     // -- Phase Detection --
     const totalPlayers = players.length;
@@ -148,22 +296,43 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     let targetId: string | undefined;
     
     if (gamePhase === 'MID') {
-        // Mid-Game: Target the leader (Tall Poppy Syndrome)
-        const leader = aliveOpponents.sort((a, b) => {
-             const scoreA = a.coins + (a.cards.filter(c => !c.revealed).length * 5);
-             const scoreB = b.coins + (b.cards.filter(c => !c.revealed).length * 5);
-             return scoreB - scoreA;
-        })[0];
+        // Mid-Game: Target the leader by threat score
+        const leader = aliveOpponents
+            .slice()
+            .sort((a, b) => computeThreatScore(b, beliefs) - computeThreatScore(a, beliefs))[0];
         targetId = leader?.id;
     } else if (gamePhase === 'END_3P_PARADOX') {
         // 3-Player Paradox: If rich, forced to coup runner-up (second strongest) to avoid being weak vs third
         // Actually, standard logic is to hit the strongest threat.
-        const sortedThreats = aliveOpponents.sort((a, b) => b.coins - a.coins);
+        const sortedThreats = aliveOpponents
+            .slice()
+            .sort((a, b) => computeThreatScore(b, beliefs) - computeThreatScore(a, beliefs));
         targetId = sortedThreats[0]?.id;
     } else {
-        // Default: Target richest
-        const richest = aliveOpponents.sort((a, b) => b.coins - a.coins)[0];
+        // Default: Target highest threat
+        const richest = aliveOpponents
+            .slice()
+            .sort((a, b) => computeThreatScore(b, beliefs) - computeThreatScore(a, beliefs))[0];
         targetId = richest?.id;
+    }
+
+    // Prefer finishing a 1-influence opponent if they are a real threat
+    if (aliveOpponents.length > 0) {
+        const killable = aliveOpponents
+            .filter(p => p.cards.filter(c => !c.revealed).length === 1)
+            .sort((a, b) => computeThreatScore(b, beliefs) - computeThreatScore(a, beliefs));
+        if (killable[0] && targetId) {
+            const currentTarget = players.find(p => p.id === targetId);
+            if (currentTarget) {
+                const currentThreat = computeThreatScore(currentTarget, beliefs);
+                const killThreat = computeThreatScore(killable[0], beliefs);
+                if (killThreat >= currentThreat - AI_TUNING.threat.finishBias) {
+                    targetId = killable[0].id;
+                }
+            }
+        } else if (killable[0]) {
+            targetId = killable[0].id;
+        }
     }
     
     // Fallback safe target
@@ -172,40 +341,13 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     // -- History Analysis for Momentum --
     let lastAction: ActionType | null = null;
     let actionFailed = false;
-
-    // Find last action by this bot
-    for (let i = gameHistory.length - 1; i >= 0; i--) {
-        const log = gameHistory[i];
-        // Log format: "Name chose to Action..." or "Name attempts to Action..."
-        if (log.message.startsWith(bot.name)) {
-            if (log.message.includes(' attempts to ') || log.message.includes(' chose to ')) {
-                const parts = log.message.split(' ');
-                const toIndex = parts.indexOf('to');
-                if (toIndex !== -1 && toIndex + 1 < parts.length) {
-                     let extractedAction = parts[toIndex + 1];
-                     if (extractedAction === 'Foreign' && parts[toIndex + 2] === 'Aid') {
-                         extractedAction = 'Foreign Aid';
-                     }
-                     
-                     // Clean up potential trailing punctuation or words (e.g. "Tax on...")
-                     // The action name is usually clean, but let's be safe
-                     const matchedAction = Object.values(ActionType).find(a => a === extractedAction);
-                     
-                     if (matchedAction) {
-                         lastAction = matchedAction;
-                         
-                         // Check if it failed in subsequent logs
-                         const subsequentLogs = gameHistory.slice(i + 1);
-                         actionFailed = subsequentLogs.some(l => 
-                            (l.message.includes(`${bot.name} accepts the block`)) || // Blocked and accepted
-                            (l.message.includes(`${bot.name} CANNOT prove role`)) || // Challenged and lost
-                            (l.message.includes(`${bot.name} must lose an influence`)) // Usually result of lost challenge
-                         );
-                         break; // Found the last action
-                     }
-                }
-            }
-        }
+    const lastActionLog = [...gameHistory].reverse().find(l => l.meta?.event === 'action_attempt' && l.meta.actorId === bot.id);
+    if (lastActionLog?.meta?.action) {
+        lastAction = lastActionLog.meta.action;
+        const subsequentLogs = gameHistory.filter(l => l.timestamp > lastActionLog.timestamp);
+        actionFailed = subsequentLogs.some(l => 
+            l.meta?.event === 'action_fail' && l.meta.actorId === bot.id && l.meta.action === lastAction
+        );
     }
 
 
@@ -228,16 +370,37 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
                  // Blocking (claiming Contessa) is usually better than Challenging (claiming they don't have Assassin),
                  // because they might actually have the Assassin.
                  // 80% Block, 20% Challenge
+                 if (deadRoles.has(Role.Contessa)) return { action: 'Challenge', decision: 'Challenge' };
                  return Math.random() < 0.8 
                     ? { action: 'Block', decision: 'Block' }
                     : { action: 'Challenge', decision: 'Challenge' };
              }
 
+             const actionDetails = ACTION_DETAILS[pendingAction.action as ActionType];
+             const claimedRoles = getRoleForAction(pendingAction.action as ActionType);
+             const actorBelief = beliefs[pendingAction.actorId] || roleScoreBase();
+             const claimConfidence = claimedRoles.length
+                ? Math.max(...claimedRoles.map(r => normalizeBelief(actorBelief[r])))
+                : 0;
+             const deadRoleClaim = claimedRoles.some(r => deadRoles.has(r));
+
+             const botRoleCounts = bot.cards
+                .filter(c => !c.revealed)
+                .reduce<Record<Role, number>>((acc, c) => {
+                    acc[c.role] = (acc[c.role] || 0) + 1;
+                    return acc;
+                }, {
+                    [Role.Duke]: 0,
+                    [Role.Assassin]: 0,
+                    [Role.Captain]: 0,
+                    [Role.Ambassador]: 0,
+                    [Role.Contessa]: 0,
+                });
+             const hasDoubleRole = claimedRoles.some(r => botRoleCounts[r] >= 2);
+
              // Check if we are allowed to block
              let canBlock = true;
              
-             const actionDetails = ACTION_DETAILS[pendingAction.action as ActionType];
-
              // 1. Check if action is blockable at all (Exchange, Tax, Income, Coup are not blockable)
              if (!actionDetails?.blockableBy || actionDetails.blockableBy.length === 0) {
                  canBlock = false;
@@ -266,43 +429,52 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
                  // Block if we have the card
                  const myBlockers = actionDetails?.blockableBy || [];
                  const hasBlocker = bot.cards.some(c => !c.revealed && myBlockers.includes(c.role));
+                 const bluffPossible = myBlockers.some(r => !deadRoles.has(r));
                  
                  // Strategy: In End-Game 1v1, block aggressively even if bluffing
-                 const bluffBlockChance = gamePhase === 'END_1V1' ? 0.4 : 0.15;
+                 const bluffBlockChance = gamePhase === 'END_1V1' ? AI_TUNING.bluff.block1v1 : AI_TUNING.bluff.blockMulti;
                  
                  if (hasBlocker && Math.random() > 0.05) return { action: 'Block', decision: 'Block' };
-                 if (!hasBlocker && Math.random() < bluffBlockChance) return { action: 'Block', decision: 'Block' };
+                 if (!hasBlocker && bluffPossible && Math.random() < bluffBlockChance) return { action: 'Block', decision: 'Block' };
              }
 
              // Challenge logic
              // Check if the action is actually challengeable
-             const isChallengeable = ACTION_DETAILS[pendingAction.action as ActionType]?.challengeable;
+             const isChallengeable = actionDetails?.challengeable;
              
              if (isChallengeable) {
                  // Mid-Game: Strategic Sacrifice? Maybe challenge more often if low on influence to try and catch a bluff?
                  // For now, keep simple random challenge, but increase slightly in 1v1
-                 const challengeChance = gamePhase === 'END_1V1' ? 0.15 : 0.05;
+                 const isTarget = pendingAction.targetId === bot.id;
+                 const lowInfluence = bot.cards.filter(c => !c.revealed).length === 1;
+                 let challengeChance = gamePhase === 'END_1V1' ? AI_TUNING.challenge.base1v1 : AI_TUNING.challenge.baseMulti;
+                 if (deadRoleClaim) challengeChance = Math.max(challengeChance, AI_TUNING.challenge.deadRoleFloor);
+                 if (claimConfidence < AI_TUNING.bluff.challengeRoleConfidence) challengeChance += AI_TUNING.challenge.lowBeliefBonus;
+                 if (hasDoubleRole) challengeChance = Math.max(challengeChance, AI_TUNING.challenge.doubleRoleFloor);
+                 if (isTarget && pendingAction.action === ActionType.Assassinate && lowInfluence) challengeChance += AI_TUNING.challenge.assassinateTargetBonus;
+                 challengeChance = Math.min(AI_TUNING.challenge.max, challengeChance);
                  if (Math.random() < challengeChance) return { action: 'Challenge', decision: 'Challenge' };
              }
         } 
         // Case 2: Bot was blocked (BlockPending) - pendingAction.actorId === bot.id
         else if (pendingAction.blockerId) {
-             let claimedRole: Role | null = null;
-             if (pendingAction.action === ActionType.Tax) claimedRole = Role.Duke;
-             if (pendingAction.action === ActionType.Steal) claimedRole = Role.Captain;
-             if (pendingAction.action === ActionType.Assassinate) claimedRole = Role.Assassin;
-             if (pendingAction.action === ActionType.Exchange) claimedRole = Role.Ambassador;
+             const blockRoles = ACTION_DETAILS[pendingAction.action]?.blockableBy || [];
+             const blockerBelief = beliefs[pendingAction.blockerId] || roleScoreBase();
+             const blockConfidence = blockRoles.length
+                ? Math.max(...blockRoles.map(r => normalizeBelief(blockerBelief[r])))
+                : 0;
+             const deadBlockClaim = blockRoles.some(r => deadRoles.has(r));
 
-             const hasClaimedRole = claimedRole && bot.cards.some(c => !c.revealed && c.role === claimedRole);
+             const actionRoles = getRoleForAction(pendingAction.action);
+             const hasActionRole = actionRoles.some(r => bot.cards.some(c => !c.revealed && c.role === r));
 
-             // If we have the card, 30% chance to challenge the block (aggressive)
-             if (hasClaimedRole && Math.random() < 0.3) {
-                 return { action: 'Challenge', decision: 'Challenge' };
-             }
-             // If we don't have the card, 5% chance to challenge (bluff challenge)
-             if (!hasClaimedRole && Math.random() < 0.05) {
-                 return { action: 'Challenge', decision: 'Challenge' };
-             }
+             let challengeChance = gamePhase === 'END_1V1' ? AI_TUNING.blockChallenge.base1v1 : AI_TUNING.blockChallenge.baseMulti;
+             if (deadBlockClaim) challengeChance = Math.max(challengeChance, AI_TUNING.blockChallenge.deadRoleFloor);
+             if (blockConfidence < AI_TUNING.bluff.challengeRoleConfidence) challengeChance += AI_TUNING.blockChallenge.lowBeliefBonus;
+             if (!hasActionRole) challengeChance -= AI_TUNING.blockChallenge.noActionRolePenalty;
+             challengeChance = Math.max(AI_TUNING.blockChallenge.min, Math.min(AI_TUNING.blockChallenge.max, challengeChance));
+
+             if (Math.random() < challengeChance) return { action: 'Challenge', decision: 'Challenge' };
              
              return { action: 'Pass', decision: 'Pass' };
         }
@@ -316,10 +488,13 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     if (bot.coins >= 10) return { action: ActionType.Coup, targetId: safeTargetId };
     
     // Check history to avoid repeating blocked moves
-    const recentLogs = gameHistory.slice(-5);
-    const wasBlockedRecently = recentLogs.some(l => l.message.includes(`${bot.name} accepts the block`));
+    const recentLogs = gameHistory.slice(-8);
+    const wasBlockedRecently = recentLogs.some(l => 
+        l.meta?.event === 'action_fail' && l.meta.actorId === bot.id && (l.meta.reason === 'block' || l.meta.reason === 'block_accept')
+    );
     
     const liveRoles = bot.cards.filter(c => !c.revealed).map(c => c.role);
+    const canClaimRole = (role: Role) => !deadRoles.has(role);
     
     // 2. End-Game 3-Player Paradox: If rich, maybe delay coup if not forced?
     // Actually, if we have 7+ coins, we usually want to Coup to eliminate a threat.
@@ -343,20 +518,23 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
         if (opponent && opponent.coins >= 5) {
             // Priority 1: Assassinate (if we have coins) - even if bluffing Assassin
             if (bot.coins >= 3) {
-                 return { action: ActionType.Assassinate, targetId: safeTargetId };
+                 if (liveRoles.includes(Role.Assassin) || canClaimRole(Role.Assassin)) {
+                    return { action: ActionType.Assassinate, targetId: safeTargetId };
+                 }
             }
             // Priority 2: Steal (to reduce their coins below 7 threshold)
             // Even if bluffing Captain
-            if (!wasBlockedRecently) {
+            if (!wasBlockedRecently && (liveRoles.includes(Role.Captain) || canClaimRole(Role.Captain))) {
                 return { action: ActionType.Steal, targetId: safeTargetId };
             }
             // Priority 3: Tax (to get coins for Assassinate/Coup ASAP)
-            return { action: ActionType.Tax };
+            if (canClaimRole(Role.Duke)) return { action: ActionType.Tax };
+            return { action: ActionType.Income };
         }
     }
     
     // End-Game 1v1: Captain is King
-    if (gamePhase === 'END_1V1' && liveRoles.includes(Role.Captain)) {
+    if (gamePhase === 'END_1V1' && (liveRoles.includes(Role.Captain) || canClaimRole(Role.Captain))) {
         return { action: ActionType.Steal, targetId: safeTargetId };
     }
     
@@ -372,6 +550,10 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
         if (lastAction === ActionType.Assassinate && bot.coins < 3) canRepeat = false;
         if (lastAction === ActionType.Coup && bot.coins < 7) canRepeat = false;
         if (lastAction === ActionType.Steal && !safeTargetId) canRepeat = false;
+        if (lastAction === ActionType.Tax && !canClaimRole(Role.Duke)) canRepeat = false;
+        if (lastAction === ActionType.Exchange && !canClaimRole(Role.Ambassador)) canRepeat = false;
+        if (lastAction === ActionType.Steal && !canClaimRole(Role.Captain)) canRepeat = false;
+        if (lastAction === ActionType.Assassinate && !canClaimRole(Role.Assassin)) canRepeat = false;
         
         // Don't repeat Exchange too often, it's passive
         if (lastAction === ActionType.Exchange && Math.random() > 0.3) canRepeat = false;
@@ -384,10 +566,10 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     if (gamePhase === 'EARLY') {
         // Early Game: Accumulation & Low Profile
         // High chance for Ambassador (Exchange) to fix hand
-        if (roll < 0.3) return { action: ActionType.Exchange };
+        if (roll < 0.3 && canClaimRole(Role.Ambassador)) return { action: ActionType.Exchange };
         
         // "Duke Tax": High reward, but risky. 
-        if (roll < 0.6) return { action: ActionType.Tax }; // 30% chance
+        if (roll < 0.6 && canClaimRole(Role.Duke)) return { action: ActionType.Tax }; // 30% chance
         
         // Slow Play: Income instead of Foreign Aid
         if (roll < 0.8) return { action: ActionType.Income }; // 20% chance
@@ -398,10 +580,10 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     
     if (gamePhase === 'END_1V1') {
         // Aggressive Stealing (Bluffing Captain)
-        if (!wasBlockedRecently && roll < 0.4) return { action: ActionType.Steal, targetId: safeTargetId };
+        if (!wasBlockedRecently && roll < 0.4 && canClaimRole(Role.Captain)) return { action: ActionType.Steal, targetId: safeTargetId };
         
         // Tax is always good
-        if (roll < 0.7) return { action: ActionType.Tax };
+        if (roll < 0.7 && canClaimRole(Role.Duke)) return { action: ActionType.Tax };
         
         return { action: ActionType.Income };
     }
@@ -421,11 +603,13 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     if (wasBlockedRecently) {
         if (roll < 0.5) return { action: ActionType.Income };
         if (roll < 0.9) return { action: ActionType.ForeignAid };
-        return { action: ActionType.Exchange };
+        if (canClaimRole(Role.Ambassador)) return { action: ActionType.Exchange };
+        return { action: ActionType.Income };
     }
 
     if (roll < 0.3) return { action: ActionType.Income };
     if (roll < 0.6) return { action: ActionType.ForeignAid };
-    if (roll < 0.85) return { action: ActionType.Tax }; // Bluff tax
-    return { action: ActionType.Exchange };
+    if (roll < 0.85 && canClaimRole(Role.Duke)) return { action: ActionType.Tax }; // Bluff tax
+    if (canClaimRole(Role.Ambassador)) return { action: ActionType.Exchange };
+    return { action: ActionType.Income };
 };
