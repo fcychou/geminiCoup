@@ -196,13 +196,13 @@ export const generateAiMove = async (
     ${JSON.stringify(gameStateSummary, null, 2)}
 
     Valid Actions:
-    - Income (+1 coin)
-    - Foreign Aid (+2 coins, blockable by Duke)
-    - Tax (+3 coins, claims Duke, challengeable)
-    - Steal (+2 coins from target, claims Captain, blockable by Captain/Ambassador - ONLY TARGET CAN BLOCK)
-    - Exchange (swap cards, claims Ambassador)
-    - Assassinate (-3 coins, eliminates influence, claims Assassin, blockable by Contessa - ONLY TARGET CAN BLOCK)
-    - Coup (-7 coins, unblockable, eliminates influence)
+    - Income (+1 coin, UNBLOCKABLE, UNCHALLENGEABLE)
+    - Foreign Aid (+2 coins, blockable by Duke, UNCHALLENGEABLE)
+    - Tax (+3 coins, claims Duke, challengeable, UNBLOCKABLE)
+    - Steal (+2 coins from target, claims Captain, blockable by Captain/Ambassador - ONLY TARGET CAN BLOCK, challengeable)
+    - Exchange (swap cards, claims Ambassador, challengeable, UNBLOCKABLE)
+    - Assassinate (-3 coins, eliminates influence, claims Assassin, blockable by Contessa - ONLY TARGET CAN BLOCK, challengeable)
+    - Coup (-7 coins, UNBLOCKABLE, UNCHALLENGEABLE, eliminates influence)
 
     STRATEGIC GUIDELINES:
     1. **Analyze History (IMPORTANT)**: Look at 'lastLogs'. 
@@ -400,9 +400,14 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
 
              // Check if we are allowed to block
              let canBlock = true;
-             
+            
              // 1. Check if action is blockable at all (Exchange, Tax, Income, Coup are not blockable)
              if (!actionDetails?.blockableBy || actionDetails.blockableBy.length === 0) {
+                 canBlock = false;
+             }
+
+             // Ensure non-blockable actions (Exchange, Tax) are never blocked by the fallback logic
+             if (pendingAction.action === ActionType.Exchange || pendingAction.action === ActionType.Tax) {
                  canBlock = false;
              }
 

@@ -445,6 +445,12 @@ const App: React.FC = () => {
   const handleBlock = (blockerId: string) => {
       if (!pendingAction) return;
 
+      const actionDetails = ACTION_DETAILS[pendingAction.action];
+      if (!actionDetails?.blockableBy || actionDetails.blockableBy.length === 0) {
+          // Action is not blockable
+          return;
+      }
+
       // Validate that only the target can block Steal or Assassinate
       if ((pendingAction.action === ActionType.Steal || pendingAction.action === ActionType.Assassinate) && 
            pendingAction.targetId !== blockerId) {
@@ -680,6 +686,22 @@ const App: React.FC = () => {
       const numToKeep = player.cards.filter(c => !c.revealed).length;
       
       if (selectedExchangeCards.length !== numToKeep) {
+          // Extra safety: force it to exactly numToKeep if somehow it's more
+          if (selectedExchangeCards.length > numToKeep) {
+              const sliced = selectedExchangeCards.slice(0, numToKeep);
+              const keptCards = exchangeCards.filter(c => sliced.includes(c.id));
+              const returnedCards = exchangeCards.filter(c => !sliced.includes(c.id));
+              
+              setPlayers(prev => prev.map(p => p.id === 'p1' ? {
+                  ...p,
+                  cards: [...p.cards.filter(c => c.revealed), ...keptCards]
+              } : p));
+              
+              setDeck(prev => shuffle([...prev, ...returnedCards]));
+              setPhase(GamePhase.Resolving);
+              addLog(`You exchanged cards.`, 'info');
+              return;
+          }
           alert(`You must select exactly ${numToKeep} cards to keep.`);
           return;
       }
@@ -914,13 +936,14 @@ const App: React.FC = () => {
                          <div className="flex gap-4 mb-8">
                             {exchangeCards.map(c => (
                                 <div key={c.id} onClick={() => {
-                                    if (selectedExchangeCards.includes(c.id)) {
-                                        setSelectedExchangeCards(prev => prev.filter(id => id !== c.id));
-                                    } else {
-                                        if (selectedExchangeCards.length < players.find(p=>p.id==='p1')!.cards.filter(x=>!x.revealed).length) {
-                                            setSelectedExchangeCards(prev => [...prev, c.id]);
-                                        }
-                                    }
+                                   if (selectedExchangeCards.includes(c.id)) {
+                                       setSelectedExchangeCards(prev => prev.filter(id => id !== c.id));
+                                   } else {
+                                       const numToKeep = players.find(p => p.id === 'p1')!.cards.filter(x => !x.revealed).length;
+                                       if (selectedExchangeCards.length < numToKeep) {
+                                           setSelectedExchangeCards(prev => [...prev, c.id]);
+                                       }
+                                   }
                                 }}>
                                     <div className={`
                                         relative transition-all duration-200 cursor-pointer
