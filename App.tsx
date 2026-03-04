@@ -208,8 +208,9 @@ const App: React.FC = () => {
         
         if (!stateRef.current.gameStarted) return;
 
+        const actionType = decision.action as ActionType;
         const targetedActions = [ActionType.Steal, ActionType.Assassinate, ActionType.Coup];
-        const showTarget = targetedActions.includes(decision.action as ActionType) && decision.targetId;
+        const showTarget = targetedActions.includes(actionType) && decision.targetId;
 
         addLog(
           `${currentPlayer.name} chose to ${decision.action}${showTarget ? ` on ${getPlayerName(decision.targetId!)}` : ''}`,
@@ -264,18 +265,28 @@ const App: React.FC = () => {
 
                      if (!stateRef.current.gameStarted) return;
 
-                     if (!interrupted) {
-                         setAiChecksComplete(true);
-                         const human = players.find(p => p.id === 'p1');
-                         const isBlockable = pendingAction.action ? !!ACTION_DETAILS[pendingAction.action].blockableBy : false;
-                         
-                         // If action is blockable and human is the target, don't auto-resolve
-                         const humanIsTarget = pendingAction.targetId === 'p1';
-                         
-                         if (pendingAction.actorId === 'p1' || human?.isEliminated || (pendingAction.actorId !== 'p1' && !humanIsTarget && !isBlockable)) {
-                             resolveAction();
-                         }
-                     }
+                    if (!interrupted) {
+                        setAiChecksComplete(true);
+                        const human = players.find(p => p.id === 'p1');
+                        const actionType = pendingAction.action as ActionType;
+                        const actionDetails = ACTION_DETAILS[actionType];
+                        const isBlockable = actionDetails ? !!actionDetails.blockableBy : false;
+                        const isChallengeable = actionDetails ? actionDetails.challengeable : false;
+                        
+                        // Human should be able to react if:
+                        // 1. Action is challengeable (anyone can challenge)
+                        // 2. Action is blockable AND (it's blockable by anyone OR human is the target)
+                        const humanCanChallenge = isChallengeable;
+                        const humanIsTarget = pendingAction.targetId === 'p1';
+                        const isBlockableByAnyone = isBlockable && !pendingAction.targetId; // e.g. Foreign Aid
+                        const humanCanBlock = isBlockable && (isBlockableByAnyone || humanIsTarget);
+                        
+                        const humanCanReact = !human?.isEliminated && (humanCanChallenge || humanCanBlock);
+                        
+                        if (pendingAction.actorId === 'p1' || !humanCanReact) {
+                            resolveAction();
+                        }
+                    }
                      setIsProcessing(false);
                  }
              } else if (players.find(p => p.id === 'p1')?.isEliminated && pendingAction.actorId !== 'p1') {
@@ -354,15 +365,18 @@ const App: React.FC = () => {
     setPendingAction(newPending);
     setAiChecksComplete(false);
     
+    const targetedActions = [ActionType.Steal, ActionType.Assassinate, ActionType.Coup];
+    const showTarget = targetedActions.includes(action) && targetId;
+
     addLog(
-      `${currentPlayer.name} attempts to ${action}${targetId ? ` on ${getPlayerName(targetId)}` : ''}`,
+      `${currentPlayer.name} attempts to ${action}${showTarget ? ` on ${getPlayerName(targetId)}` : ''}`,
       'action',
       { event: 'action_attempt', action, actorId: currentPlayer.id, targetId }
     );
     
     // Animate Action Declaration
     showAnim(currentPlayer.id, action, 'action');
-    if (targetId) {
+    if (showTarget) {
         // Delay slighty so it doesn't overlap perfectly with actor animation
         setTimeout(() => showAnim(targetId, "Targeted!", 'error'), 200);
     }
@@ -513,8 +527,17 @@ const App: React.FC = () => {
                  );
                  setPhase(GamePhase.Resolving);
              } else {
-                 const isBlockable = !!ACTION_DETAILS[pendingAction!.action].blockableBy;
-                 if (isBlockable && pendingAction!.targetId && pendingAction!.targetId !== challengerId) {
+                 const actionType = pendingAction!.action as ActionType;
+                 const actionDetails = ACTION_DETAILS[actionType];
+                 const isBlockable = actionDetails ? !!actionDetails.blockableBy : false;
+                 
+                 const human = players.find(p => p.id === 'p1');
+                 const humanIsAlive = human && !human.isEliminated;
+                 const humanIsTarget = pendingAction!.targetId === 'p1';
+                 const isBlockableByAnyone = isBlockable && !pendingAction!.targetId;
+                 const humanCanBlock = isBlockable && (isBlockableByAnyone || humanIsTarget);
+
+                 if (humanIsAlive && humanCanBlock && pendingAction!.targetId !== challengerId) {
                      addLog(
                        `Action stands. ${getPlayerName(pendingAction!.targetId)} can still block.`,
                        'info',
