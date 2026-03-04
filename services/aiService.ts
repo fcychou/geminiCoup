@@ -207,8 +207,9 @@ export const generateAiMove = async (
     STRATEGIC GUIDELINES:
     1. **Analyze History (IMPORTANT)**: Look at 'lastLogs'. 
        - If you recently tried to bluff (e.g., Tax without a Duke) and were challenged, DO NOT try that same action again immediately.
-       - If you tried to Steal from someone and they blocked you, choose a different target or action.
-       - Avoid repeating the same action (like Income) more than twice in a row; it makes you predictable.
+       - If you tried to Steal from someone and they blocked you, choose a different target or action next time.
+       - DO NOT REPEAT THE SAME ACTION more than twice in a row (especially Income, Steal, or Tax). Predictability leads to losing.
+       - VARY YOUR STRATEGY: Even if a bluff worked, consider switching to a safe action or a different bluff to keep opponents guessing.
     
     2. **Turn Logic (Phase: TurnStart)**:
        - **Must Coup**: If you have >= 10 coins, you must choose 'Coup'.
@@ -547,9 +548,9 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
     const roll = Math.random();
 
     // -- Momentum Logic --
-    // If the last action worked (bluff or not), high chance to repeat it.
-    // We do this BEFORE phase logic to override it with "what's working".
-    if (lastAction && !actionFailed && Math.random() < 0.6) {
+    // If the last action worked (bluff or not), there's a chance to repeat it.
+    // We reduced this from 0.6 to 0.3 to prevent predictable repetitive behavior.
+    if (lastAction && !actionFailed && Math.random() < 0.3) {
         // Validate constraints for the repeated action
         let canRepeat = true;
         if (lastAction === ActionType.Assassinate && bot.coins < 3) canRepeat = false;
@@ -560,6 +561,9 @@ const fallbackAiLogic = (bot: Player, players: Player[], pendingAction: PendingA
         if (lastAction === ActionType.Steal && !canClaimRole(Role.Captain)) canRepeat = false;
         if (lastAction === ActionType.Assassinate && !canClaimRole(Role.Assassin)) canRepeat = false;
         
+        // If it's Steal and it was blocked by target, definitely don't repeat immediately on same target
+        if (lastAction === ActionType.Steal && wasBlockedRecently) canRepeat = false;
+
         // Don't repeat Exchange too often, it's passive
         if (lastAction === ActionType.Exchange && Math.random() > 0.3) canRepeat = false;
 

@@ -266,7 +266,13 @@ const App: React.FC = () => {
 
                      if (!interrupted) {
                          setAiChecksComplete(true);
-                         if (pendingAction.actorId === 'p1' || human?.isEliminated) {
+                         const human = players.find(p => p.id === 'p1');
+                         const isBlockable = pendingAction.action ? !!ACTION_DETAILS[pendingAction.action].blockableBy : false;
+                         
+                         // If action is blockable and human is the target, don't auto-resolve
+                         const humanIsTarget = pendingAction.targetId === 'p1';
+                         
+                         if (pendingAction.actorId === 'p1' || human?.isEliminated || (pendingAction.actorId !== 'p1' && !humanIsTarget && !isBlockable)) {
                              resolveAction();
                          }
                      }
@@ -507,12 +513,24 @@ const App: React.FC = () => {
                  );
                  setPhase(GamePhase.Resolving);
              } else {
-                 addLog(
-                   `Action stands. Resolving...`,
-                   'info',
-                   { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
-                 );
-                 resolveAction(); 
+                 const isBlockable = !!ACTION_DETAILS[pendingAction!.action].blockableBy;
+                 if (isBlockable && pendingAction!.targetId && pendingAction!.targetId !== challengerId) {
+                     addLog(
+                       `Action stands. ${getPlayerName(pendingAction!.targetId)} can still block.`,
+                       'info',
+                       { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
+                     );
+                     // Set to pending to allow blocking
+                     setAiChecksComplete(false);
+                     setPhase(GamePhase.ActionPending);
+                 } else {
+                     addLog(
+                       `Action stands. Resolving...`,
+                       'info',
+                       { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
+                     );
+                     resolveAction(); 
+                 }
              }
           };
 
