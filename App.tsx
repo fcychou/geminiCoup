@@ -1,10 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import { ROLES, ACTION_DETAILS, ROLE_DESCRIPTIONS, ROLE_COLORS } from './constants';
+import { v4 as uuid4 } from 'uuid';
+import { ROLES, ACTION_DETAILS, ROLE_COLORS } from './constants';
 import { Player, Card, GamePhase, Role, ActionType, GameLog, PendingAction } from './types';
 import PlayerSpot from './components/PlayerSpot';
 import CardComponent from './components/Card';
 import { generateAiMove } from './services/aiService';
+
+interface GameStats {
+  wins: number;
+  losses: number;
+  totalGames: number;
+  totalDurationMs: number;
+}
 
 // -- Helper Functions --
 const shuffle = <T,>(array: T[]): T[] => {
@@ -16,7 +23,7 @@ const createDeck = (): Card[] => {
   ROLES.forEach(role => {
     // 3 copies of each card
     for (let i = 0; i < 3; i++) {
-      deck.push({ id: uuidv4(), role, revealed: false });
+      deck.push({ id: uuid4(), role, revealed: false });
     }
   });
   return shuffle(deck);
@@ -51,6 +58,14 @@ const App: React.FC = () => {
   const [resumeCallback, setResumeCallback] = useState<(() => void) | null>(null);
   const [aiChecksComplete, setAiChecksComplete] = useState(false);
 
+  // User Stats
+  const [stats, setStats] = useState<GameStats>(() => {
+    const saved = localStorage.getItem('coup_stats');
+    return saved ? JSON.parse(saved) : { wins: 0, losses: 0, totalGames: 0, totalDurationMs: 0 };
+  });
+  const [showStats, setShowStats] = useState(false);
+  const [gameStartTime, setGameStartTime] = useState<number | null>(null);
+
   // Refs for consistent state access in timeouts/async logic
   const stateRef = useRef({ players, deck, turnIndex, gameStarted });
   useEffect(() => {
@@ -68,8 +83,8 @@ const App: React.FC = () => {
   }, [pendingAction, phase]);
 
   // -- Logging & Animation Helpers --
-  const addLog = (message: string, type: GameLog['type'] = 'info', meta?: GameLog['meta']) => {
-    setLogs(prev => [...prev, { id: uuidv4(), message, timestamp: Date.now(), type, meta }]);
+  const addLog = (message: string, type: GameLog['type'] = 'info') => {
+    setLogs(prev => [...prev, { id: uuid4(), message, timestamp: Date.now(), type }]);
   };
 
   const showAnim = (playerId: string, message: string, type: 'gain' | 'loss' | 'info' | 'error' | 'action' = 'info') => {
@@ -122,6 +137,7 @@ const App: React.FC = () => {
     setIsProcessing(false);
     setAiChecksComplete(false);
     setPlayerNotifications({});
+    setGameStartTime(Date.now());
     
     addLog(`Game started with ${numBots} bots.`, 'info');
   };
@@ -143,10 +159,28 @@ const App: React.FC = () => {
       setSelectedExchangeCards([]);
       setAiChecksComplete(false);
       setPlayerNotifications({});
+      setGameStartTime(null);
   };
 
   const currentPlayer = players[turnIndex];
   
+  // -- Stats Tracking --
+  useEffect(() => {
+    if (phase === GamePhase.GameOver && winner && gameStartTime) {
+      const duration = Date.now() - gameStartTime;
+      const isWin = winner.id === 'p1';
+      const newStats = {
+        wins: stats.wins + (isWin ? 1 : 0),
+        losses: stats.losses + (isWin ? 0 : 1),
+        totalGames: stats.totalGames + 1,
+        totalDurationMs: stats.totalDurationMs + duration,
+      };
+      setStats(newStats);
+      localStorage.setItem('coup_stats', JSON.stringify(newStats));
+      setGameStartTime(null); // prevent double counting
+    }
+  }, [phase, winner, gameStartTime, stats]);
+
   // -- Turn Management --
   const nextTurn = useCallback(() => {
     // Use Ref to ensure we have the latest state even if called via stale closure
@@ -208,15 +242,10 @@ const App: React.FC = () => {
         
         if (!stateRef.current.gameStarted) return;
 
-        const actionType = decision.action as ActionType;
         const targetedActions = [ActionType.Steal, ActionType.Assassinate, ActionType.Coup];
-        const showTarget = targetedActions.includes(actionType) && decision.targetId;
+        const showTarget = targetedActions.includes(decision.action as ActionType) && decision.targetId;
 
-        addLog(
-          `${currentPlayer.name} chose to ${decision.action}${showTarget ? ` on ${getPlayerName(decision.targetId!)}` : ''}`,
-          'action',
-          { event: 'action_chosen', action: decision.action as ActionType, actorId: currentPlayer.id, targetId: decision.targetId }
-        );
+        addLog(`${currentPlayer.name} chose to ${decision.action}${showTarget ? ` on ${getPlayerName(decision.targetId!)}` : ''}`, 'action');
         
         handleActionSelect(decision.action as ActionType, decision.targetId);
         setIsProcessing(false);
@@ -265,28 +294,12 @@ const App: React.FC = () => {
 
                      if (!stateRef.current.gameStarted) return;
 
-                    if (!interrupted) {
-                        setAiChecksComplete(true);
-                        const human = players.find(p => p.id === 'p1');
-                        const actionType = pendingAction.action as ActionType;
-                        const actionDetails = ACTION_DETAILS[actionType];
-                        const isBlockable = actionDetails ? !!actionDetails.blockableBy : false;
-                        const isChallengeable = actionDetails ? actionDetails.challengeable : false;
-                        
-                        // Human should be able to react if:
-                        // 1. Action is challengeable (anyone can challenge)
-                        // 2. Action is blockable AND (it's blockable by anyone OR human is the target)
-                        const humanCanChallenge = isChallengeable;
-                        const humanIsTarget = pendingAction.targetId === 'p1';
-                        const isBlockableByAnyone = isBlockable && !pendingAction.targetId; // e.g. Foreign Aid
-                        const humanCanBlock = isBlockable && (isBlockableByAnyone || humanIsTarget);
-                        
-                        const humanCanReact = !human?.isEliminated && (humanCanChallenge || humanCanBlock);
-                        
-                        if (pendingAction.actorId === 'p1' || !humanCanReact) {
-                            resolveAction();
-                        }
-                    }
+                     if (!interrupted) {
+                         setAiChecksComplete(true);
+                         if (pendingAction.actorId === 'p1' || human?.isEliminated) {
+                             resolveAction();
+                         }
+                     }
                      setIsProcessing(false);
                  }
              } else if (players.find(p => p.id === 'p1')?.isEliminated && pendingAction.actorId !== 'p1') {
@@ -308,11 +321,7 @@ const App: React.FC = () => {
                  if (decision.decision === 'Challenge') {
                      handleChallenge(actor.id); 
                  } else {
-                     addLog(
-                       `${actor.name} accepts the block.`,
-                       'info',
-                       { event: 'action_fail', action: pendingAction.action, actorId: pendingAction.actorId, reason: 'block_accept' }
-                     );
+                     addLog(`${actor.name} accepts the block.`, 'info');
                      setPhase(GamePhase.Resolving); 
                  }
                  setAiChecksComplete(true);
@@ -365,18 +374,11 @@ const App: React.FC = () => {
     setPendingAction(newPending);
     setAiChecksComplete(false);
     
-    const targetedActions = [ActionType.Steal, ActionType.Assassinate, ActionType.Coup];
-    const showTarget = targetedActions.includes(action) && targetId;
-
-    addLog(
-      `${currentPlayer.name} attempts to ${action}${showTarget ? ` on ${getPlayerName(targetId)}` : ''}`,
-      'action',
-      { event: 'action_attempt', action, actorId: currentPlayer.id, targetId }
-    );
+    addLog(`${currentPlayer.name} attempts to ${action}${targetId ? ` on ${getPlayerName(targetId)}` : ''}`, 'action');
     
     // Animate Action Declaration
     showAnim(currentPlayer.id, action, 'action');
-    if (showTarget) {
+    if (targetId) {
         // Delay slighty so it doesn't overlap perfectly with actor animation
         setTimeout(() => showAnim(targetId, "Targeted!", 'error'), 200);
     }
@@ -465,12 +467,6 @@ const App: React.FC = () => {
   const handleBlock = (blockerId: string) => {
       if (!pendingAction) return;
 
-      const actionDetails = ACTION_DETAILS[pendingAction.action];
-      if (!actionDetails?.blockableBy || actionDetails.blockableBy.length === 0) {
-          // Action is not blockable
-          return;
-      }
-
       // Validate that only the target can block Steal or Assassinate
       if ((pendingAction.action === ActionType.Steal || pendingAction.action === ActionType.Assassinate) && 
            pendingAction.targetId !== blockerId) {
@@ -478,11 +474,7 @@ const App: React.FC = () => {
           return;
       }
 
-      addLog(
-        `${getPlayerName(blockerId)} BLOCKS the ${pendingAction.action}!`,
-        'challenge',
-        { event: 'block', action: pendingAction.action, actorId: blockerId, targetId: pendingAction.targetId }
-      );
+      addLog(`${getPlayerName(blockerId)} BLOCKS the ${pendingAction.action}!`, 'challenge');
       showAnim(blockerId, "BLOCKED!", 'info');
       setPendingAction({ ...pendingAction, blockerId });
       setAiChecksComplete(false); // Reset for block verification
@@ -494,11 +486,7 @@ const App: React.FC = () => {
       const targetId = isBlocking ? pendingAction!.blockerId! : pendingAction!.actorId;
       const challengedRole = getRequiredRole(isBlocking ? 'Block' : pendingAction!.action, pendingAction!.action);
 
-      addLog(
-        `${getPlayerName(challengerId)} CHALLENGES ${getPlayerName(targetId)}! (Claims ${challengedRole ? challengedRole.join(' or ') : 'valid role'})`,
-        'challenge',
-        { event: 'challenge', action: pendingAction!.action, actorId: challengerId, targetId, roles: challengedRole, isBlock: isBlocking }
-      );
+      addLog(`${getPlayerName(challengerId)} CHALLENGES ${getPlayerName(targetId)}! (Claims ${challengedRole ? challengedRole.join(' or ') : 'valid role'})`, 'challenge');
       showAnim(challengerId, "CHALLENGE!", 'error');
 
       const targetPlayer = players.find(p => p.id === targetId)!;
@@ -509,51 +497,17 @@ const App: React.FC = () => {
       const hasCard = targetPlayer.cards.some(c => !c.revealed && validRoles?.includes(c.role));
 
       if (hasCard) {
-          const revealedRole = targetPlayer.cards.find(c => !c.revealed && validRoles?.includes(c.role))?.role;
-          addLog(
-            `${getPlayerName(targetId)} REVEALS valid card! Challenge failed.`,
-            'info',
-            { event: 'challenge_fail', action: pendingAction!.action, actorId: targetId, roles: revealedRole ? [revealedRole] : validRoles, isBlock: isBlocking }
-          );
+          addLog(`${getPlayerName(targetId)} REVEALS valid card! Challenge failed.`, 'info');
           
           const onChallengerLostCard = () => {
              // Must use ref for swap to ensure deck integrity
              swapCard(targetId, validRoles!);
              if (isBlocking) {
-                 addLog(
-                   `Block stands. Action blocked.`,
-                   'info',
-                   { event: 'action_fail', action: pendingAction!.action, actorId: pendingAction!.actorId, reason: 'block' }
-                 );
+                 addLog(`Block stands. Action blocked.`, 'info');
                  setPhase(GamePhase.Resolving);
              } else {
-                 const actionType = pendingAction!.action as ActionType;
-                 const actionDetails = ACTION_DETAILS[actionType];
-                 const isBlockable = actionDetails ? !!actionDetails.blockableBy : false;
-                 
-                 const human = players.find(p => p.id === 'p1');
-                 const humanIsAlive = human && !human.isEliminated;
-                 const humanIsTarget = pendingAction!.targetId === 'p1';
-                 const isBlockableByAnyone = isBlockable && !pendingAction!.targetId;
-                 const humanCanBlock = isBlockable && (isBlockableByAnyone || humanIsTarget);
-
-                 if (humanIsAlive && humanCanBlock && pendingAction!.targetId !== challengerId) {
-                     addLog(
-                       `Action stands. ${getPlayerName(pendingAction!.targetId)} can still block.`,
-                       'info',
-                       { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
-                     );
-                     // Set to pending to allow blocking
-                     setAiChecksComplete(false);
-                     setPhase(GamePhase.ActionPending);
-                 } else {
-                     addLog(
-                       `Action stands. Resolving...`,
-                       'info',
-                       { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
-                     );
-                     resolveAction(); 
-                 }
+                 addLog(`Action stands. Resolving...`, 'info');
+                 resolveAction(); 
              }
           };
 
@@ -567,26 +521,14 @@ const App: React.FC = () => {
           onChallengerLostCard(); 
 
       } else {
-          addLog(
-            `${getPlayerName(targetId)} CANNOT prove role! Challenge successful.`,
-            'challenge',
-            { event: 'challenge_success', action: pendingAction!.action, actorId: targetId, roles: validRoles, isBlock: isBlocking }
-          );
+          addLog(`${getPlayerName(targetId)} CANNOT prove role! Challenge successful.`, 'challenge');
           
           const onTargetLostCard = () => {
               if (isBlocking) {
-                   addLog(
-                     `Block failed. Resolving original action...`,
-                     'info',
-                     { event: 'action_success', action: pendingAction!.action, actorId: pendingAction!.actorId }
-                   );
+                   addLog(`Block failed. Resolving original action...`, 'info');
                    resolveAction();
               } else {
-                   addLog(
-                     `Action failed due to successful challenge.`,
-                     'info',
-                     { event: 'action_fail', action: pendingAction!.action, actorId: pendingAction!.actorId, reason: 'challenge' }
-                   );
+                   addLog(`Action failed due to successful challenge.`, 'info');
                    if (pendingAction!.action === ActionType.Assassinate) updateCoins(pendingAction!.actorId, 3);
                    setPhase(GamePhase.Resolving);
               }
@@ -634,7 +576,7 @@ const App: React.FC = () => {
       if (!newCard) return; // Deck empty?
 
       const newDeckContent = currentDeck.slice(1);
-      newDeckContent.push({ ...oldCard, id: uuidv4(), revealed: false }); 
+      newDeckContent.push({ ...oldCard, id: uuid4(), revealed: false });
       
       const shuffledDeck = shuffle(newDeckContent);
       setDeck(shuffledDeck);
@@ -652,7 +594,7 @@ const App: React.FC = () => {
       const liveCards = player.cards.filter(c => !c.revealed);
       if (liveCards.length === 0) return; 
 
-      addLog(`${player.name} must lose an influence.`, 'challenge', { event: 'lose_influence', actorId: playerId });
+      addLog(`${player.name} must lose an influence.`, 'challenge');
       showAnim(playerId, "LOST INFLUENCE", 'loss');
 
       if (player.isAi) {
@@ -668,12 +610,8 @@ const App: React.FC = () => {
   const revealCard = (playerId: string, cardId: string) => {
       setPlayers(prev => prev.map(p => {
           if (p.id !== playerId) return p;
-          const targetCard = p.cards.find(c => c.id === cardId);
           const newCards = p.cards.map(c => c.id === cardId ? { ...c, revealed: true } : c);
           const isEliminated = newCards.every(c => c.revealed);
-          if (targetCard) {
-            addLog(`${p.name} reveals ${targetCard.role}.`, 'info', { event: 'reveal', actorId: playerId, roles: [targetCard.role] });
-          }
           if (isEliminated) addLog(`${p.name} has been eliminated!`, 'challenge');
           return { ...p, cards: newCards, isEliminated };
       }));
@@ -727,22 +665,6 @@ const App: React.FC = () => {
       const numToKeep = player.cards.filter(c => !c.revealed).length;
       
       if (selectedExchangeCards.length !== numToKeep) {
-          // Extra safety: force it to exactly numToKeep if somehow it's more
-          if (selectedExchangeCards.length > numToKeep) {
-              const sliced = selectedExchangeCards.slice(0, numToKeep);
-              const keptCards = exchangeCards.filter(c => sliced.includes(c.id));
-              const returnedCards = exchangeCards.filter(c => !sliced.includes(c.id));
-              
-              setPlayers(prev => prev.map(p => p.id === 'p1' ? {
-                  ...p,
-                  cards: [...p.cards.filter(c => c.revealed), ...keptCards]
-              } : p));
-              
-              setDeck(prev => shuffle([...prev, ...returnedCards]));
-              setPhase(GamePhase.Resolving);
-              addLog(`You exchanged cards.`, 'info');
-              return;
-          }
           alert(`You must select exactly ${numToKeep} cards to keep.`);
           return;
       }
@@ -781,6 +703,9 @@ const App: React.FC = () => {
       <header className="p-4 border-b border-gray-800 bg-gray-900/90 backdrop-blur z-50 relative flex justify-between items-center">
         <h1 className="text-2xl font-bold text-coup-gold tracking-wider">GEMINI COUP</h1>
         <div className="flex items-center gap-4">
+            <button onClick={() => setShowStats(true)} className="text-xs font-bold text-gray-300 hover:text-white border border-gray-700 hover:border-gray-500 bg-gray-800/50 px-3 py-1.5 rounded transition-colors uppercase tracking-wide cursor-pointer flex items-center justify-center">
+                📈 Stats
+            </button>
             {gameStarted && (
                 <button 
                     onClick={quitGame}
@@ -798,6 +723,45 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="relative z-0 h-[calc(100vh-64px)] flex flex-col">
         
+        {/* Stats Modal */}
+        {showStats && (
+            <div className="absolute inset-0 bg-black/80 z-[100] flex flex-col items-center justify-center animate-fade-in p-4">
+                <div className="bg-gray-800 p-8 rounded-2xl shadow-2xl border border-gray-700 max-w-sm w-full relative">
+                    <button onClick={() => setShowStats(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white text-xl">✕</button>
+                    <h2 className="text-2xl font-bold mb-6 text-center text-coup-gold">Game Statistics</h2>
+                    
+                    <div className="space-y-4">
+                        <div className="flex justify-between border-b border-gray-700 pb-2">
+                            <span className="text-gray-400">Total Games</span>
+                            <span className="font-mono text-xl">{stats.totalGames}</span>
+                        </div>
+                        <div className="flex justify-between border-b border-gray-700 pb-2">
+                            <span className="text-gray-400">Wins</span>
+                            <span className="font-mono text-xl text-green-400">{stats.wins}</span>
+                        </div>
+                        <div className="flex justify-between border-b border-gray-700 pb-2">
+                            <span className="text-gray-400">Losses</span>
+                            <span className="font-mono text-xl text-red-400">{stats.losses}</span>
+                        </div>
+                        <div className="flex justify-between border-b border-gray-700 pb-2">
+                            <span className="text-gray-400">Win Rate</span>
+                            <span className="font-mono text-xl text-blue-400">
+                                {stats.totalGames > 0 ? Math.round((stats.wins / stats.totalGames) * 100) : 0}%
+                            </span>
+                        </div>
+                        <div className="flex justify-between pt-2">
+                            <span className="text-gray-400">Avg Duration</span>
+                            <span className="font-mono text-xl">
+                                {stats.totalGames > 0 
+                                    ? `${Math.round(stats.totalDurationMs / stats.totalGames / 1000)}s` 
+                                    : '0s'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
         {!gameStarted ? (
           <div className="flex-1 flex flex-col items-center justify-center p-8 space-y-8 animate-fade-in">
              <div className="bg-gray-800 p-8 rounded-2xl shadow-2xl border border-gray-700 max-w-md w-full">
@@ -940,10 +904,7 @@ const App: React.FC = () => {
                      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex gap-4 animate-slide-up z-30">
                          <div className="bg-gray-800 p-4 rounded text-center">
                             <div className="mb-2 text-white">{getPlayerName(pendingAction.blockerId)} blocked you!</div>
-                            <button onClick={() => { 
-                                addLog("Block accepted.", 'info', { event: 'action_fail', action: pendingAction.action, actorId: pendingAction.actorId, reason: 'block_accept' }); 
-                                setPhase(GamePhase.Resolving); 
-                            }} className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded mr-2">Accept Block</button>
+                            <button onClick={() => { addLog("Block accepted."); setPhase(GamePhase.Resolving); }} className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded mr-2">Accept Block</button>
                             <button onClick={() => handleChallenge('p1')} className="bg-red-900 hover:bg-red-700 text-white px-4 py-2 rounded border border-red-500">Challenge Block</button>
                          </div>
                      </div>
@@ -977,14 +938,13 @@ const App: React.FC = () => {
                          <div className="flex gap-4 mb-8">
                             {exchangeCards.map(c => (
                                 <div key={c.id} onClick={() => {
-                                   if (selectedExchangeCards.includes(c.id)) {
-                                       setSelectedExchangeCards(prev => prev.filter(id => id !== c.id));
-                                   } else {
-                                       const numToKeep = players.find(p => p.id === 'p1')!.cards.filter(x => !x.revealed).length;
-                                       if (selectedExchangeCards.length < numToKeep) {
-                                           setSelectedExchangeCards(prev => [...prev, c.id]);
-                                       }
-                                   }
+                                    if (selectedExchangeCards.includes(c.id)) {
+                                        setSelectedExchangeCards(prev => prev.filter(id => id !== c.id));
+                                    } else {
+                                        if (selectedExchangeCards.length < players.find(p=>p.id==='p1')!.cards.filter(x=>!x.revealed).length) {
+                                            setSelectedExchangeCards(prev => [...prev, c.id]);
+                                        }
+                                    }
                                 }}>
                                     <div className={`
                                         relative transition-all duration-200 cursor-pointer

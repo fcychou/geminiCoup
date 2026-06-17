@@ -36,25 +36,6 @@ export interface GameLog {
   message: string;
   timestamp: number;
   type: 'info' | 'action' | 'challenge' | 'error';
-  meta?: {
-    event:
-      | 'action_chosen'
-      | 'action_attempt'
-      | 'block'
-      | 'challenge'
-      | 'challenge_fail'
-      | 'challenge_success'
-      | 'action_fail'
-      | 'action_success'
-      | 'reveal'
-      | 'lose_influence';
-    action?: ActionType;
-    actorId?: string;
-    targetId?: string;
-    roles?: Role[];
-    isBlock?: boolean;
-    reason?: 'block' | 'block_accept' | 'challenge';
-  };
 }
 
 export interface GameAction {
